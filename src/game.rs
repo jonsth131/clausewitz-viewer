@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub enum Game {
     None,
     Hoi4,
+    Stellaris,
 }
 
 pub async fn check_game(path: PathBuf) -> Game {
@@ -11,6 +12,12 @@ pub async fn check_game(path: PathBuf) -> Game {
         .exists()
     {
         Game::Hoi4
+    } else if PathBuf::from(
+        path.clone().into_os_string().into_string().unwrap() + "/augustus_rev.txt",
+    )
+    .exists()
+    {
+        Game::Stellaris
     } else {
         Game::None
     }

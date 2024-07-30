@@ -10,6 +10,7 @@ use crate::game::check_game;
 use crate::game::Game;
 
 mod hoi4_view;
+mod stellaris_view;
 
 pub fn run() -> iced::Result {
     ClausewitzViewer::run(Settings {
@@ -23,6 +24,7 @@ enum View {
     #[default]
     Default,
     Hoi4(hoi4_view::Hoi4View),
+    Stellaris(stellaris_view::StellarisView),
 }
 
 #[derive(Default)]
@@ -37,6 +39,7 @@ enum Message {
     PathOpened(Result<PathBuf, Error>),
     GamePathOpened(Game),
     Hoi4Message(hoi4_view::Message),
+    StellarisMessage(stellaris_view::Message),
 }
 
 impl Application for ClausewitzViewer {
@@ -78,10 +81,24 @@ impl Application for ClausewitzViewer {
 
                     task.map(Message::Hoi4Message)
                 }
+                Game::Stellaris => {
+                    let (view, task) =
+                        stellaris_view::StellarisView::new(self.file.as_ref().unwrap().clone());
+                    self.view = View::Stellaris(view);
+
+                    task.map(Message::StellarisMessage)
+                }
                 _ => Command::none(),
             },
             Message::Hoi4Message(message) => {
                 if let View::Hoi4(view) = &mut self.view {
+                    let _ = view.update(message);
+                }
+
+                Command::none()
+            }
+            Message::StellarisMessage(message) => {
+                if let View::Stellaris(view) = &mut self.view {
                     let _ = view.update(message);
                 }
 
@@ -110,6 +127,7 @@ impl Application for ClausewitzViewer {
                     .into()
             }
             View::Hoi4(view) => return view.view().map(|m| Message::Hoi4Message(m)),
+            View::Stellaris(view) => return view.view().map(|m| Message::StellarisMessage(m)),
         }
     }
 
