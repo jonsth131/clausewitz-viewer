@@ -1,0 +1,34 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+object = {
+    "{" ~ "}"
+  | "{" ~ (pair)+ ~ "}"
+}
+
+identifier = ${ (!(" " | "\"" | "}" | "{" | "=" | "\n" | "\r" | "\t" | "#") ~ ANY)+ }
+
+pair = { (identifier | string) ~ sign ~ value }
+sign = { ("=" | "<" | ">") }
+
+array = { "{" ~ value+ ~ "}" }
+
+value = _{ object | array | string | date | number | identifier }
+
+string = ${ "\"" ~ inner ~ "\"" }
+inner  = @{ char* }
+char   = @{
+    !("\"" | "\\") ~ ANY
+  | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+
+date = @{
+    ASCII_DIGIT{4} ~ "." ~ ASCII_DIGIT{1, 2} ~ "." ~ ASCII_DIGIT{1, 2} ~ ("." ~ ASCII_DIGIT)?
+}
+
+number = @{
+    "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT*)? ~ (NEWLINE | " ")
+}
+
+config = _{ SOI ~ (pair)* ~ EOI }

@@ -1,0 +1,16 @@
+[package]
+name = "clausewitz-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.39.1", features = ["fs"] }
+iced = { version = "0.12.1", features = [
+    "highlighter",
+    "tokio",
+    "debug",
+    "lazy",
+] }
+pest = "2.6"
+pest_derive = "2.6"
+rfd = "0.13"
