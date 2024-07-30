@@ -139,7 +139,133 @@ impl Hoi4View {
             ]
             .spacing(20);
 
-            column![first_row, second_row].spacing(20)
+            let third_row = row![
+                column![
+                    text("Recruit Characters:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(country.recruit_characters.join("\n"))])
+                            .width(250)
+                            .height(150)
+                    )
+                ],
+                column![
+                    text("Created Country Leaders:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(
+                            country
+                                .created_country_leaders
+                                .clone()
+                                .into_iter()
+                                .map(|i| format!("{}", i))
+                                .collect::<Vec<String>>()
+                                .join("\n\n")
+                        )])
+                        .width(500)
+                        .height(150)
+                    )
+                ],
+            ]
+            .spacing(20);
+
+            let start_1939 = if country.start_1939.is_empty() {
+                column![]
+            } else {
+                column![
+                    text("1939 Start:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(
+                            country
+                                .start_1939
+                                .clone()
+                                .into_iter()
+                                .map(|v| format!("{}", v))
+                                .collect::<Vec<String>>()
+                                .join("\n")
+                        )])
+                        .width(750)
+                        .height(150)
+                    )
+                ]
+            };
+
+            let variables = if country.variables.is_empty() {
+                column![]
+            } else {
+                column![
+                    text("Variables:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(
+                            country
+                                .variables
+                                .clone()
+                                .into_iter()
+                                .map(|v| format!("{}", v))
+                                .collect::<Vec<String>>()
+                                .join("\n")
+                        )])
+                        .width(750)
+                        .height(150)
+                    )
+                ]
+            };
+
+            let ifs = if country.ifs.is_empty() {
+                column![]
+            } else {
+                column![
+                    text("Ifs:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(
+                            country
+                                .ifs
+                                .clone()
+                                .into_iter()
+                                .map(|v| format!("{}", v))
+                                .collect::<Vec<String>>()
+                                .join("\n")
+                        )])
+                        .width(750)
+                        .height(150)
+                    )
+                ]
+            };
+
+            let unknown_fields = if country.unknown.is_empty() {
+                column![]
+            } else {
+                column![
+                    text("Unknown fields:").size(20),
+                    vertical_space().height(10),
+                    container(
+                        scrollable(column![text(
+                            country
+                                .unknown
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<String>>()
+                                .join("\n")
+                        )])
+                        .width(750)
+                        .height(250)
+                    )
+                ]
+            };
+
+            column![
+                first_row,
+                second_row,
+                third_row,
+                start_1939,
+                ifs,
+                variables,
+                unknown_fields
+            ]
+            .spacing(20)
         } else {
             column![text("No country selected")]
         };
