@@ -6,11 +6,7 @@ use iced::{Application, Command, Element, Font, Length, Settings, Subscription};
 
 use std::path::PathBuf;
 
-use crate::game::check_game;
-use crate::game::Game;
-
-mod hoi4_view;
-mod stellaris_view;
+mod data_view;
 
 pub fn run() -> iced::Result {
     ClausewitzViewer::run(Settings {
@@ -23,8 +19,7 @@ pub fn run() -> iced::Result {
 enum View {
     #[default]
     Default,
-    Hoi4(hoi4_view::Hoi4View),
-    Stellaris(stellaris_view::StellarisView),
+    DataView(data_view::DataView),
 }
 
 #[derive(Default)]
@@ -37,9 +32,7 @@ struct ClausewitzViewer {
 enum Message {
     OpenPath,
     PathOpened(Result<PathBuf, Error>),
-    GamePathOpened(Game),
-    Hoi4Message(hoi4_view::Message),
-    StellarisMessage(stellaris_view::Message),
+    DataViewMessage(data_view::Message),
 }
 
 impl Application for ClausewitzViewer {
@@ -68,37 +61,15 @@ impl Application for ClausewitzViewer {
             Message::PathOpened(result) => {
                 if let Ok(path) = result {
                     self.file = Some(path.clone());
-                    return Command::perform(check_game(path.clone()), Message::GamePathOpened);
                 }
 
-                Command::none()
+                let (view, task) = data_view::DataView::new(self.file.as_ref().unwrap().clone());
+                self.view = View::DataView(view);
+
+                task.map(Message::DataViewMessage)
             }
-            Message::GamePathOpened(game) => match game {
-                Game::Hoi4 => {
-                    let (view, task) =
-                        hoi4_view::Hoi4View::new(self.file.as_ref().unwrap().clone());
-                    self.view = View::Hoi4(view);
-
-                    task.map(Message::Hoi4Message)
-                }
-                Game::Stellaris => {
-                    let (view, task) =
-                        stellaris_view::StellarisView::new(self.file.as_ref().unwrap().clone());
-                    self.view = View::Stellaris(view);
-
-                    task.map(Message::StellarisMessage)
-                }
-                _ => Command::none(),
-            },
-            Message::Hoi4Message(message) => {
-                if let View::Hoi4(view) = &mut self.view {
-                    let _ = view.update(message);
-                }
-
-                Command::none()
-            }
-            Message::StellarisMessage(message) => {
-                if let View::Stellaris(view) = &mut self.view {
+            Message::DataViewMessage(message) => {
+                if let View::DataView(view) = &mut self.view {
                     let _ = view.update(message);
                 }
 
@@ -126,8 +97,7 @@ impl Application for ClausewitzViewer {
                     .height(Length::Fill)
                     .into()
             }
-            View::Hoi4(view) => return view.view().map(|m| Message::Hoi4Message(m)),
-            View::Stellaris(view) => return view.view().map(|m| Message::StellarisMessage(m)),
+            View::DataView(view) => return view.view().map(|m| Message::DataViewMessage(m)),
         }
     }
 

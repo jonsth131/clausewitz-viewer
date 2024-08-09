@@ -18,88 +18,13 @@ pub enum ConfigValue {
     Date(u16, u8, u8),
 }
 
-impl ConfigValue {
-    pub fn to_u8(&self) -> u8 {
-        match self {
-            ConfigValue::Number(num) => *num as u8,
-            _ => 0,
-        }
-    }
-
-    pub fn to_u16(&self) -> u16 {
-        match self {
-            ConfigValue::Number(num) => *num as u16,
-            _ => 0,
-        }
-    }
-
-    pub fn to_i32(&self) -> i32 {
-        match self {
-            ConfigValue::Number(num) => *num as i32,
-            _ => 0,
-        }
-    }
-
-    pub fn to_f32(&self) -> f32 {
-        match self {
-            ConfigValue::Number(num) => *num as f32,
-            _ => 0.0,
-        }
-    }
-
-    pub fn to_string(&self) -> String {
-        match self {
-            ConfigValue::String(string) => string.clone(),
-            ConfigValue::Identifier(string) => string.clone(),
-            _ => String::from(""),
-        }
-    }
-
-    pub fn to_strings(&self) -> Vec<String> {
-        let mut strings = Vec::new();
-
-        match self {
-            ConfigValue::Array(array) => {
-                for value in array {
-                    strings.push(value.to_string());
-                }
-            }
-            _ => strings.push(self.to_string()),
-        }
-
-        strings
-    }
-
-    pub fn to_bool(&self) -> bool {
-        match self {
-            ConfigValue::Identifier(string) => string == "yes",
-            _ => false,
-        }
-    }
-
-    pub fn get_identifiers_from_object(&self) -> Vec<String> {
-        let mut identifiers = Vec::new();
-
-        let obj = match self {
-            ConfigValue::Object(obj) => obj,
-            _ => return identifiers,
-        };
-
-        for pair in obj {
-            identifiers.push(pair.identifier.clone());
-        }
-
-        identifiers
-    }
-}
-
 impl Display for ConfigValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             ConfigValue::Object(object) => {
-                write!(f, "{{ ")?;
+                write!(f, "{{\n")?;
                 for pair in object {
-                    write!(f, "{} ", pair)?;
+                    write!(f, "   {}", pair)?;
                 }
                 write!(f, "}}")
             }
@@ -127,7 +52,7 @@ pub struct ConfigPair {
 
 impl Display for ConfigPair {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{} {} {}", self.identifier, self.sign, self.value)
+        write!(f, "{} {} {}\n", self.identifier, self.sign, self.value)
     }
 }
 
