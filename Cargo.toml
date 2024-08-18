@@ -5,12 +5,11 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.39.1", features = ["fs"] }
-iced = { version = "0.12.1", features = [
-    "highlighter",
-    "tokio",
-    "debug",
-    "lazy",
-] }
+iced = { version = "0.12.1", features = ["advanced", "tokio", "debug", "lazy"] }
 pest = "2.6"
 pest_derive = "2.6"
 rfd = "0.13"
+
+[dependencies.uuid]
+version = "1.10.0"
+features = ["v4", "fast-rng", "macro-diagnostics"]
