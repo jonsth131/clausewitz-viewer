@@ -16,6 +16,7 @@ pub enum ConfigValue {
     Number(f64),
     Identifier(String),
     Date(u16, u8, u8),
+    Named(String, Vec<ConfigValue>),
 }
 
 impl Display for ConfigValue {
@@ -39,6 +40,13 @@ impl Display for ConfigValue {
             ConfigValue::Number(number) => write!(f, "{}", number),
             ConfigValue::Identifier(identifier) => write!(f, "{}", identifier),
             ConfigValue::Date(year, month, day) => write!(f, "{}.{}.{}", year, month, day),
+            ConfigValue::Named(name, values) => {
+                write!(f, "{} ", name)?;
+                for value in values {
+                    write!(f, "{} ", value)?;
+                }
+                write!(f, "")
+            }
         }
     }
 }
@@ -113,6 +121,15 @@ pub fn parse_config_file(file: &str) -> Result<Vec<ConfigPair>, Error<Rule>> {
                 let day = date[2].parse().unwrap();
 
                 ConfigValue::Date(year, month, day)
+            }
+            Rule::named => {
+                let mut inner_rules = pair.into_inner();
+                let name = inner_rules.next().unwrap().as_str().to_owned();
+                let mut values = Vec::new();
+                while let Some(pair) = inner_rules.next() {
+                    values.push(parse_value(pair));
+                }
+                ConfigValue::Named(name, values)
             }
             _ => unreachable!(),
         }

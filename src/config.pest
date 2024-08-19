@@ -10,11 +10,11 @@ object = {
 identifier = ${ (!(" " | "\"" | "}" | "{" | "=" | "\n" | "\r" | "\t" | "#") ~ ANY)+ }
 
 pair = { (identifier | string) ~ sign ~ value }
-sign = { ("<=" | ">=" | "=" | "<" | ">" | "+") }
+sign = { ("<=" | ">=" | "!=" | "=" | "<" | ">" | "+") }
 
 array = { "{" ~ value+ ~ "}" }
 
-value = _{ object | array | string | date | number | identifier }
+value = _{ object | array | string | date | number | named | identifier }
 
 string = ${ "\"" ~ inner ~ "\"" }
 inner  = @{ char* }
@@ -23,8 +23,10 @@ char   = @{
   | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
 
+named = { ASCII_ALPHA+ ~ array }
+
 date = @{
-    ASCII_DIGIT{4} ~ "." ~ ASCII_DIGIT{1, 2} ~ "." ~ ASCII_DIGIT{1, 2} ~ ("." ~ ASCII_DIGIT)?
+    ASCII_DIGIT{4} ~ "." ~ ASCII_DIGIT{1, 2} ~ "." ~ ASCII_DIGIT{1, 2} ~ ("." ~ ASCII_DIGIT*)?
 }
 
 number = @{
