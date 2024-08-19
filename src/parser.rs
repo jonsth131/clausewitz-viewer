@@ -380,7 +380,7 @@ mod tests {
         ]);
         assert_eq!(
             format!("{}", value),
-            "{ key8 = \"value8\" key9 = 84 key12 = 3.41 key13 = { 4 5 6 } }"
+            "{\n   key8 = \"value8\"\n   key9 = 84\n   key12 = 3.41\n   key13 = { 4 5 6 }\n}"
         );
     }
 
@@ -391,6 +391,6 @@ mod tests {
             sign: "=".to_string(),
             value: ConfigValue::String("value1".to_string()),
         };
-        assert_eq!(format!("{}", pair), "key1 = \"value1\"");
+        assert_eq!(format!("{}", pair), "key1 = \"value1\"\n");
     }
 }
