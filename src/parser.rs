@@ -23,7 +23,7 @@ impl Display for ConfigValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             ConfigValue::Object(object) => {
-                write!(f, "{{\n")?;
+                writeln!(f, "{{")?;
                 for pair in object {
                     write!(f, "   {}", pair)?;
                 }
@@ -60,12 +60,12 @@ pub struct ConfigPair {
 
 impl Display for ConfigPair {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{} {} {}\n", self.identifier, self.sign, self.value)
+        writeln!(f, "{} {} {}", self.identifier, self.sign, self.value)
     }
 }
 
-pub fn parse_config_file(file: &str) -> Result<Vec<ConfigPair>, Error<Rule>> {
-    let cfg = ConfigParser::parse(Rule::config, file)?;
+pub fn parse_config_file(file: &str) -> Result<Vec<ConfigPair>, Box<Error<Rule>>> {
+    let cfg = ConfigParser::parse(Rule::config, file).map_err(Box::new)?;
 
     use pest::iterators::Pair;
 
@@ -89,17 +89,15 @@ pub fn parse_config_file(file: &str) -> Result<Vec<ConfigPair>, Error<Rule>> {
     fn parse_value(pair: Pair<Rule>) -> ConfigValue {
         match pair.as_rule() {
             Rule::object => {
-                let mut inner_rules = pair.into_inner();
                 let mut object = Vec::new();
-                while let Some(pair) = inner_rules.next() {
+                for pair in pair.into_inner() {
                     object.push(parse_pair(pair));
                 }
                 ConfigValue::Object(object)
             }
             Rule::array => {
-                let mut inner_rules = pair.into_inner();
                 let mut array = Vec::new();
-                while let Some(pair) = inner_rules.next() {
+                for pair in pair.into_inner() {
                     array.push(parse_value(pair));
                 }
                 ConfigValue::Array(array)
@@ -126,7 +124,7 @@ pub fn parse_config_file(file: &str) -> Result<Vec<ConfigPair>, Error<Rule>> {
                 let mut inner_rules = pair.into_inner();
                 let name = inner_rules.next().unwrap().as_str().to_owned();
                 let mut values = Vec::new();
-                while let Some(pair) = inner_rules.next() {
+                for pair in inner_rules {
                     values.push(parse_value(pair));
                 }
                 ConfigValue::Named(name, values)

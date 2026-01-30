@@ -8,7 +8,7 @@ use crate::{
 pub fn parse_game(path: &PathBuf) -> HashMap<String, Vec<ConfigPair>> {
     let mut parsed_files = HashMap::new();
 
-    let files = find_txt_files(&path);
+    let files = find_txt_files(path);
 
     for file in files {
         let file_name = file.file_stem().unwrap().to_str().unwrap().to_string();

@@ -194,13 +194,13 @@ impl DataView {
 
             row = row.push(horizontal_space().width((indent_width * depth) as u16));
 
-            if value.children.len() > 0 && !value.open {
+            if !value.children.is_empty() && !value.open {
                 row = row.push(
                     button("+")
                         .width(button_width)
                         .on_press(Message::Expand(value.id.clone())),
                 );
-            } else if value.children.len() > 0 && value.open {
+            } else if !value.children.is_empty() && value.open {
                 row = row.push(
                     button("-")
                         .width(button_width)
@@ -225,15 +225,11 @@ impl DataView {
             col
         }
 
-        let selected_file = if let Some(file) = &self.selected_file {
+        let selected_file = if let Some(_file) = &self.selected_file {
             let mut content = Column::new();
             for (key, value) in self.current_open_file.iter() {
-                if value.len() == 1 {
-                    content = content.push(create_row(key, &value[0], 0));
-                } else if value.len() > 1 {
-                    for val in value.iter() {
-                        content = content.push(create_row(key, val, 0));
-                    }
+                for val in value.iter() {
+                    content = content.push(create_row(key, val, 0));
                 }
             }
 
@@ -283,7 +279,7 @@ fn map_values(pair: &ConfigPair) -> DataValue {
             sign: pair.sign.clone(),
             value: "...".to_string(),
             open: false,
-            children: children.iter().map(|pair| map_values(&pair)).collect(),
+            children: children.iter().map(map_values).collect(),
         },
         _ => DataValue {
             id: Uuid::new_v4().to_string(),

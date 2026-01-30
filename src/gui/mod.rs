@@ -19,7 +19,7 @@ pub fn run() -> iced::Result {
 enum View {
     #[default]
     Default,
-    DataView(data_view::DataView),
+    DataView(Box<data_view::DataView>),
 }
 
 #[derive(Default)]
@@ -32,7 +32,7 @@ struct ClausewitzViewer {
 enum Message {
     OpenPath,
     PathOpened(Result<PathBuf, Error>),
-    DataViewMessage(data_view::Message),
+    DataViewMsg(data_view::Message),
 }
 
 impl Application for ClausewitzViewer {
@@ -64,11 +64,11 @@ impl Application for ClausewitzViewer {
                 }
 
                 let (view, task) = data_view::DataView::new(self.file.as_ref().unwrap().clone());
-                self.view = View::DataView(view);
+                self.view = View::DataView(Box::new(view));
 
-                task.map(Message::DataViewMessage)
+                task.map(Message::DataViewMsg)
             }
-            Message::DataViewMessage(message) => {
+            Message::DataViewMsg(message) => {
                 if let View::DataView(view) = &mut self.view {
                     let _ = view.update(message);
                 }
@@ -89,15 +89,13 @@ impl Application for ClausewitzViewer {
         let controls = row![button("Open Clausewitz Game Path...").on_press(Message::OpenPath)];
 
         match &self.view {
-            View::Default => {
-                return container(controls)
-                    .center_x()
-                    .center_y()
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            }
-            View::DataView(view) => return view.view().map(|m| Message::DataViewMessage(m)),
+            View::Default => container(controls)
+                .center_x()
+                .center_y()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            View::DataView(view) => view.view().map(Message::DataViewMsg),
         }
     }
 
