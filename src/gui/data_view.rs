@@ -296,3 +296,91 @@ async fn parse(path: PathBuf) -> Arc<HashMap<String, Vec<ConfigPair>>> {
     let data = parse_game(&path);
     Arc::new(data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_map_values_simple_number_and_string() {
+        let pair_num = ConfigPair {
+            identifier: "num".to_string(),
+            sign: "=".to_string(),
+            value: ConfigValue::Number(1.0),
+        };
+
+        let dv = map_values(&pair_num);
+        assert_eq!(dv.identifier, "num");
+        assert_eq!(dv.sign, "=");
+        assert_eq!(dv.value, "1");
+        assert!(dv.children.is_empty());
+
+        let pair_str = ConfigPair {
+            identifier: "s".to_string(),
+            sign: "=".to_string(),
+            value: ConfigValue::String("hello".to_string()),
+        };
+
+        let dv2 = map_values(&pair_str);
+        assert_eq!(dv2.identifier, "s");
+        assert_eq!(dv2.value, "\"hello\"");
+    }
+
+    #[test]
+    fn test_map_values_object_nesting() {
+        let child = ConfigPair {
+            identifier: "child".to_string(),
+            sign: "=".to_string(),
+            value: ConfigValue::String("v".to_string()),
+        };
+
+        let parent = ConfigPair {
+            identifier: "parent".to_string(),
+            sign: "=".to_string(),
+            value: ConfigValue::Object(vec![child.clone()]),
+        };
+
+        let dv = map_values(&parent);
+        assert_eq!(dv.identifier, "parent");
+        assert_eq!(dv.value, "...");
+        assert_eq!(dv.children.len(), 1);
+        assert_eq!(dv.children[0].identifier, "child");
+        assert_eq!(dv.children[0].value, "\"v\"");
+    }
+
+    #[test]
+    fn test_dataview_selected_groups() {
+        let mut view = DataView {
+            is_loading: false,
+            data: HashMap::new(),
+            current_open_file: HashMap::new(),
+            files: combo_box::State::new(vec![]),
+            selected_file: None,
+        };
+
+        let pair1 = ConfigPair {
+            identifier: "grp".to_string(),
+            sign: "=".to_string(),
+            value: ConfigValue::Number(2.0),
+        };
+
+        // two entries with same identifier should group under the same key
+        let entries = vec![pair1.clone(), pair1.clone()];
+        let mut map = HashMap::new();
+        map.insert("file1".to_string(), entries);
+
+        let arc = Arc::new(map);
+        // simulate Loaded
+        let _ = view.update(Message::Loaded(arc.clone()));
+        assert!(!view.is_loading);
+        assert!(view.data.contains_key("file1"));
+
+        // select file1
+        let _ = view.update(Message::Selected("file1".to_string()));
+        assert_eq!(view.selected_file.as_ref().map(String::as_str), Some("file1"));
+        assert!(view.current_open_file.contains_key("grp"));
+        assert_eq!(view.current_open_file.get("grp").unwrap().len(), 2);
+    }
+}
