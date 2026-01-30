@@ -8,3 +8,42 @@ pub fn read_file(path: &PathBuf) -> String {
         Err(_) => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::read_file;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_read_file_existing() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let mut f = File::create(&file_path).unwrap();
+        writeln!(f, "hello world").unwrap();
+
+        let content = read_file(&file_path);
+        assert!(content.contains("hello world"));
+    }
+
+    #[test]
+    fn test_read_file_missing() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("missing.txt");
+
+        let content = read_file(&file_path);
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn test_read_file_non_ascii() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("utf8.txt");
+        let mut f = File::create(&file_path).unwrap();
+        writeln!(f, "café — test").unwrap();
+
+        let content = read_file(&file_path);
+        assert!(content.contains("café"));
+    }
+}
