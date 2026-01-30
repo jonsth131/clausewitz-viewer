@@ -228,10 +228,10 @@ impl DataView {
         let selected_file = if let Some(_file) = &self.selected_file {
             let mut content = Column::new();
             for (key, value) in self.current_open_file.iter() {
-                    for val in value.iter() {
-                        content = content.push(create_row(key, val, 0));
-                    }
+                for val in value.iter() {
+                    content = content.push(create_row(key, val, 0));
                 }
+            }
 
             container(
                 column![
