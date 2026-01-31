@@ -300,8 +300,6 @@ async fn parse(path: PathBuf) -> Arc<HashMap<String, Vec<ConfigPair>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::collections::HashMap;
 
     #[test]
     fn test_map_values_simple_number_and_string() {
