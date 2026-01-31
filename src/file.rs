@@ -2,10 +2,14 @@ use std::{fs, path::PathBuf};
 
 pub fn read_file(path: &PathBuf) -> String {
     // Preserve valid UTF-8; only remove invalid characters that fail to decode.
-    // Fall back to an empty string on I/O error to keep behavior similar but safer.
+    // Fall back to an empty string on I/O error to keep behavior similar but safer,
+    // but log the error so that failures are visible during debugging.
     match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => String::new(),
+        Err(e) => {
+            eprintln!("Failed to read file {}: {}", path.display(), e);
+            String::new()
+        }
     }
 }
 
