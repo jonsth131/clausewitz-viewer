@@ -1,16 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io, path::Path};
 
-pub fn read_file(path: &PathBuf) -> String {
-    // Preserve valid UTF-8; only remove invalid characters that fail to decode.
-    // Fall back to an empty string on I/O error to keep behavior similar but safer,
-    // but log the error so that failures are visible during debugging.
-    match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read file {}: {}", path.display(), e);
-            String::new()
-        }
-    }
+pub fn read_file(path: &Path) -> Result<String, io::Error> {
+    fs::read_to_string(path)
 }
 
 #[cfg(test)]
@@ -27,7 +18,7 @@ mod tests {
         let mut f = File::create(&file_path).unwrap();
         writeln!(f, "hello world").unwrap();
 
-        let content = read_file(&file_path);
+        let content = read_file(&file_path).unwrap();
         assert!(content.contains("hello world"));
     }
 
@@ -36,8 +27,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("missing.txt");
 
-        let content = read_file(&file_path);
-        assert_eq!(content, "");
+        assert!(read_file(&file_path).is_err());
     }
 
     #[test]
@@ -47,7 +37,7 @@ mod tests {
         let mut f = File::create(&file_path).unwrap();
         writeln!(f, "café — test").unwrap();
 
-        let content = read_file(&file_path);
+        let content = read_file(&file_path).unwrap();
         assert!(content.contains("café"));
     }
 }

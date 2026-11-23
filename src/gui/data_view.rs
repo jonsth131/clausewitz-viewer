@@ -1,269 +1,439 @@
-use std::collections::HashMap;
+use std::cell::{Ref, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::Duration;
 
 use iced::widget::{
-    button, column, combo_box, container, horizontal_space, row, scrollable, text, vertical_space,
-    Column, Row,
+    button, column, container, row, scrollable, text, text_input, Column, Row, Space,
 };
-use iced::{Alignment, Command, Element, Length};
-use uuid::Uuid;
+use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::game::parse_game;
-use crate::parser::{ConfigPair, ConfigValue};
+use crate::game::{parse_game, LoadProgress, ParsedGame};
+use crate::parser::{ConfigEntry, ConfigValue};
+
+const FILE_ROW_HEIGHT: f32 = 30.0;
+const TREE_ROW_HEIGHT: f32 = 28.0;
+const TREE_VIEW_MAX_WIDTH: f32 = 1200.0;
+const TREE_CHARACTER_WIDTH: f32 = 10.0;
+const ROW_OVERSCAN: usize = 3;
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    FilterChanged(String),
     Selected(String),
-    Loaded(Arc<HashMap<String, Vec<ConfigPair>>>),
+    PollLoad,
+    CancelLoad,
     Collapse(String),
     Expand(String),
     CollapseAll,
     ExpandAll,
+    FilesScrolled { offset: f32, height: f32 },
+    TreeScrolled { offset: f32, height: f32 },
+}
+
+#[derive(Debug)]
+struct WorkerState {
+    progress: LoadProgress,
+    result: Option<Result<Option<ParsedGame>, String>>,
+}
+
+#[derive(Debug)]
+struct LoadJob {
+    cancelled: Arc<AtomicBool>,
+    state: Arc<Mutex<WorkerState>>,
+}
+
+impl Drop for LoadJob {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+impl LoadJob {
+    fn start(path: PathBuf) -> Result<Self, String> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(WorkerState {
+            progress: LoadProgress::Discovering { files: 0 },
+            result: None,
+        }));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker_state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("game-loader".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(|| {
+                    parse_game(&path, &worker_cancelled, |progress| {
+                        worker_state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .progress = progress;
+                    })
+                })
+                .unwrap_or_else(|_| Err("Game loading failed unexpectedly".to_string()));
+                worker_state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .result = Some(result);
+            })
+            .map_err(|error| format!("Could not start game loader: {error}"))?;
+        Ok(Self { cancelled, state })
+    }
 }
 
 #[derive(Debug)]
 pub struct DataView {
-    is_loading: bool,
-    data: HashMap<String, Vec<ConfigPair>>,
-    current_open_file: HashMap<String, Vec<DataValue>>,
-    files: combo_box::State<String>,
+    job: Option<LoadJob>,
+    progress: LoadProgress,
+    cancelled: bool,
+    data: BTreeMap<String, Vec<ConfigEntry>>,
+    errors: Vec<String>,
+    load_error: Option<String>,
+    expanded: HashSet<String>,
+    collapsed: HashSet<String>,
+    expand_all: bool,
+    tree_rows: RefCell<Option<TreeRowCache>>,
+    search: FileSearchCache,
     selected_file: Option<String>,
+    file_viewport: Viewport,
+    tree_viewport: Viewport,
 }
 
-#[derive(Debug, Clone)]
-struct DataValue {
-    id: String,
-    identifier: String,
-    sign: String,
-    value: String,
-    open: bool,
-    children: Vec<DataValue>,
+#[derive(Debug, Default)]
+struct Viewport {
+    offset: f32,
+    height: f32,
+}
+
+#[derive(Debug, Default)]
+struct FileSearchCache {
+    normalized_paths: Vec<(String, String)>,
+    query: String,
+    matches: Vec<String>,
+}
+
+impl FileSearchCache {
+    fn set_files(&mut self, files: impl Iterator<Item = String>) {
+        self.normalized_paths = files.map(|path| (path.to_lowercase(), path)).collect();
+        self.recompute();
+    }
+
+    fn set_query(&mut self, query: String) {
+        if self.query != query {
+            self.query = query;
+            self.recompute();
+        }
+    }
+
+    fn recompute(&mut self) {
+        let query = self.query.to_lowercase();
+        self.matches = self
+            .normalized_paths
+            .iter()
+            .filter(|(normalized, _)| normalized.contains(&query))
+            .map(|(_, path)| path.clone())
+            .collect();
+    }
 }
 
 impl DataView {
-    pub fn new(path: PathBuf) -> (Self, iced::Command<Message>) {
-        (
-            DataView {
-                is_loading: true,
-                data: HashMap::new(),
-                current_open_file: HashMap::new(),
-                files: combo_box::State::new(vec![]),
-                selected_file: None,
+    pub fn new(path: PathBuf) -> (Self, Task<Message>) {
+        let mut view = Self {
+            job: None,
+            progress: LoadProgress::Discovering { files: 0 },
+            cancelled: false,
+            data: BTreeMap::new(),
+            errors: Vec::new(),
+            load_error: None,
+            expanded: HashSet::new(),
+            collapsed: HashSet::new(),
+            expand_all: false,
+            tree_rows: RefCell::new(None),
+            search: FileSearchCache::default(),
+            selected_file: None,
+            file_viewport: Viewport {
+                offset: 0.0,
+                height: 600.0,
             },
-            Command::perform(parse(path.clone()), Message::Loaded),
-        )
+            tree_viewport: Viewport {
+                offset: 0.0,
+                height: 600.0,
+            },
+        };
+        match LoadJob::start(path) {
+            Ok(job) => view.job = Some(job),
+            Err(error) => view.load_error = Some(error),
+        }
+        (view, Task::none())
     }
 
-    pub fn update(&mut self, message: Message) -> Command<Message> {
-        fn traverse(value: &mut DataValue, item: &str, act: fn(&mut DataValue)) {
-            if value.id == item {
-                act(value);
-            } else {
-                for child in value.children.iter_mut() {
-                    traverse(child, item, act);
+    pub fn subscription(&self) -> Subscription<Message> {
+        if self.job.is_some() {
+            iced::time::every(Duration::from_millis(100)).map(|_| Message::PollLoad)
+        } else {
+            Subscription::none()
+        }
+    }
+
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::PollLoad => {
+                if let Some(job) = &self.job {
+                    let mut state = job.state.lock().unwrap_or_else(|error| error.into_inner());
+                    self.progress = state.progress.clone();
+                    let result = state.result.take();
+                    drop(state);
+                    if let Some(result) = result {
+                        self.job = None;
+                        match result {
+                            Ok(Some(data)) => {
+                                self.data = data.files;
+                                self.errors = data.errors;
+                                self.invalidate_tree_rows();
+                                self.search.set_files(self.data.keys().cloned());
+                            }
+                            Ok(None) => self.cancelled = true,
+                            Err(error) => self.load_error = Some(error),
+                        }
+                    }
                 }
             }
-        }
-
-        match message {
-            Message::Loaded(data) => {
-                self.is_loading = false;
-                self.data = (*data).clone();
-                self.files = combo_box::State::new(self.data.keys().cloned().collect());
-
-                Command::none()
+            Message::CancelLoad => {
+                self.job = None;
+                self.cancelled = true;
+                log::info!("Game loading cancelled");
+            }
+            Message::FilterChanged(filter) => {
+                self.search.set_query(filter);
+                self.file_viewport.offset = 0.0;
             }
             Message::Selected(file) => {
-                self.selected_file = Some(file.clone());
-
-                let data = self.data.get(&file).unwrap();
-                self.current_open_file = HashMap::new();
-
-                for pair in data {
-                    let value = map_values(pair);
-
-                    if !self.current_open_file.contains_key(&pair.identifier) {
-                        self.current_open_file
-                            .insert(pair.identifier.clone(), vec![value]);
-                    } else {
-                        self.current_open_file
-                            .get_mut(&pair.identifier)
-                            .unwrap()
-                            .push(value);
-                    }
+                if self.data.contains_key(&file) {
+                    self.selected_file = Some(file);
+                    self.expanded.clear();
+                    self.collapsed.clear();
+                    self.expand_all = false;
+                    self.tree_viewport.offset = 0.0;
+                    self.invalidate_tree_rows();
                 }
-
-                Command::none()
             }
             Message::Collapse(item) => {
-                fn collapse(value: &mut DataValue) {
-                    value.open = false;
-
-                    for child in value.children.iter_mut() {
-                        collapse(child);
-                    }
+                let changed = if self.expand_all {
+                    self.collapsed.insert(item)
+                } else {
+                    self.expanded.remove(&item)
+                };
+                if changed {
+                    self.invalidate_tree_rows();
                 }
-
-                for value in self.current_open_file.values_mut() {
-                    for val in value {
-                        traverse(val, &item, collapse);
-                    }
-                }
-
-                Command::none()
             }
             Message::Expand(item) => {
-                fn expand(value: &mut DataValue) {
-                    value.open = true;
+                let changed = if self.expand_all {
+                    self.collapsed.remove(&item)
+                } else {
+                    self.expanded.insert(item)
+                };
+                if changed {
+                    self.invalidate_tree_rows();
                 }
-
-                for value in self.current_open_file.values_mut() {
-                    for val in value {
-                        traverse(val, &item, expand);
-                    }
-                }
-
-                Command::none()
             }
             Message::CollapseAll => {
-                fn collapse(value: &mut DataValue) {
-                    value.open = false;
-
-                    for child in value.children.iter_mut() {
-                        collapse(child);
-                    }
-                }
-
-                for value in self.current_open_file.values_mut() {
-                    for val in value {
-                        collapse(val);
-                    }
-                }
-
-                Command::none()
+                self.expand_all = false;
+                self.expanded.clear();
+                self.collapsed.clear();
+                self.invalidate_tree_rows();
             }
             Message::ExpandAll => {
-                fn expand(value: &mut DataValue) {
-                    value.open = true;
-
-                    for child in value.children.iter_mut() {
-                        expand(child);
-                    }
-                }
-
-                for value in self.current_open_file.values_mut() {
-                    for val in value {
-                        expand(val);
-                    }
-                }
-
-                Command::none()
+                self.expand_all = true;
+                self.expanded.clear();
+                self.collapsed.clear();
+                self.invalidate_tree_rows();
+            }
+            Message::FilesScrolled { offset, height } => {
+                self.file_viewport = Viewport { offset, height };
+            }
+            Message::TreeScrolled { offset, height } => {
+                self.tree_viewport = Viewport { offset, height };
             }
         }
+        Task::none()
     }
 
-    pub fn view(&self) -> Element<Message> {
-        if self.is_loading {
+    fn invalidate_tree_rows(&mut self) {
+        *self.tree_rows.get_mut() = None;
+    }
+
+    fn tree_rows_cache(&self) -> Ref<'_, TreeRowCache> {
+        let is_missing = self.tree_rows.borrow().is_none();
+        if is_missing {
+            let rows = self
+                .selected_file
+                .as_ref()
+                .and_then(|file| self.data.get(file))
+                .map(|entries| {
+                    flatten_tree_rows(entries, self.expand_all, &self.expanded, &self.collapsed)
+                })
+                .unwrap_or_default();
+            self.tree_rows.replace(Some(rows));
+        }
+        Ref::map(self.tree_rows.borrow(), |rows| {
+            rows.as_ref().expect("tree row cache was just initialized")
+        })
+    }
+
+    pub fn view(&self) -> Element<'_, Message> {
+        if self.job.is_some() {
+            let progress = match self.progress {
+                LoadProgress::Discovering { files } => format!("Discovering files: {files} found"),
+                LoadProgress::Parsing { completed, total } => {
+                    format!("Parsing files: {completed} / {total}")
+                }
+            };
             return container(
-                column![text("Loading...").size(50), vertical_space().height(50),]
-                    .width(Length::Fill)
-                    .align_items(Alignment::Center)
-                    .spacing(10),
+                column![
+                    text("Loading...").size(30),
+                    text(progress),
+                    button("Cancel").on_press(Message::CancelLoad)
+                ]
+                .align_x(Alignment::Center)
+                .spacing(15),
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into();
         }
 
-        let combo_box = combo_box(
-            &self.files,
-            "Select a file",
-            self.selected_file.as_ref(),
-            Message::Selected,
-        )
-        .width(450);
-
-        fn create_row(key: &str, value: &DataValue, depth: usize) -> Column<'static, Message> {
-            let mut col = Column::new();
-            let mut row = Row::new();
-            let button_width = 20;
-            let indent_width = 25;
-
-            row = row.push(horizontal_space().width((indent_width * depth) as u16));
-
-            if !value.children.is_empty() && !value.open {
-                row = row.push(
-                    button("+")
-                        .width(button_width)
-                        .on_press(Message::Expand(value.id.clone())),
-                );
-            } else if !value.children.is_empty() && value.open {
-                row = row.push(
-                    button("-")
-                        .width(button_width)
-                        .on_press(Message::Collapse(value.id.clone())),
-                );
-            } else {
-                row = row.push(horizontal_space().width(button_width));
-            }
-
-            row = row.push(horizontal_space().width(10));
-            row = row.push(text(format!("{} {} {}", key, value.sign, value.value)));
-
-            col = col.push(row);
-            col = col.push(vertical_space().height(10));
-
-            if value.open {
-                for child in value.children.iter() {
-                    col = col.push(create_row(&child.identifier, child, depth + 1));
-                }
-            }
-
-            col
+        if self.cancelled || self.load_error.is_some() {
+            let message = self
+                .load_error
+                .as_deref()
+                .unwrap_or("Loading cancelled. Open a folder to try again.");
+            return container(text(message)).padding(20).into();
         }
 
-        let selected_file = if let Some(_file) = &self.selected_file {
-            let mut content = Column::new();
-            for (key, value) in self.current_open_file.iter() {
-                for val in value.iter() {
-                    content = content.push(create_row(key, val, 0));
-                }
-            }
+        let matches = &self.search.matches;
+        let file_start = window_start(
+            self.file_viewport.offset,
+            self.file_viewport.height,
+            FILE_ROW_HEIGHT,
+            matches.len(),
+        );
+        let file_end = window_end(
+            self.file_viewport.offset,
+            self.file_viewport.height,
+            FILE_ROW_HEIGHT,
+            matches.len(),
+        );
+        let mut file_rows: Column<'_, Message> = Column::new().spacing(0);
+        for file in &matches[file_start..file_end] {
+            file_rows = file_rows.push(
+                button(text(file.clone()).wrapping(iced::widget::text::Wrapping::None))
+                    .width(Length::Shrink)
+                    .height(FILE_ROW_HEIGHT as u32)
+                    .on_press(Message::Selected(file.clone())),
+            );
+        }
+        let file_content = column![
+            Space::new().height(file_start as f32 * FILE_ROW_HEIGHT),
+            file_rows,
+            Space::new().height(matches.len().saturating_sub(file_end) as f32 * FILE_ROW_HEIGHT),
+        ];
+        let mut file_list: Column<'_, Message> = Column::new().spacing(4);
+        if matches.is_empty() {
+            file_list = file_list.push(text(if self.data.is_empty() {
+                "No non-empty files were loaded."
+            } else {
+                "No matching files."
+            }));
+        }
+        let file_content: Element<'_, Message> = if matches.is_empty() {
+            file_list.into()
+        } else {
+            file_content.into()
+        };
+        let sidebar = column![
+            text_input("Filter file paths", &self.search.query).on_input(Message::FilterChanged),
+            scrollable(file_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .direction(scrollable::Direction::Both {
+                    vertical: scrollable::Scrollbar::default(),
+                    horizontal: scrollable::Scrollbar::default(),
+                })
+                .on_scroll(|viewport| Message::FilesScrolled {
+                    offset: viewport.absolute_offset().y,
+                    height: viewport.bounds().height,
+                }),
+        ]
+        .width(300)
+        .height(Length::Fill)
+        .spacing(10);
 
-            container(
-                column![
+        let mut details = Column::new().spacing(10);
+        if !self.errors.is_empty() {
+            let mut error_list = Column::new().spacing(5);
+            for error in &self.errors {
+                error_list = error_list.push(text(error));
+            }
+            details = details
+                .push(text(format!(
+                    "Some files could not be loaded ({}):",
+                    self.errors.len()
+                )))
+                .push(scrollable(error_list).height(120));
+        }
+        if let Some(file) = &self.selected_file {
+            let cache = self.tree_rows_cache();
+            let rows = visible_tree_rows(
+                &self.data[file],
+                &cache,
+                self.tree_viewport.offset,
+                self.tree_viewport.height,
+            );
+            let mut tree: Column<'_, Message> = Column::new().spacing(0).width(Length::Fill);
+            for row_data in &rows.rows {
+                tree = tree.push(create_tree_row(row_data));
+            }
+            let tree_content = column![
+                Space::new().height(rows.start as f32 * TREE_ROW_HEIGHT),
+                tree,
+                Space::new().height(rows.total.saturating_sub(rows.end) as f32 * TREE_ROW_HEIGHT),
+            ]
+            .width(Length::Fixed(rows.content_width));
+            details = details
+                .push(text(file))
+                .push(
                     row![
                         button("Expand all").on_press(Message::ExpandAll),
                         button("Collapse all").on_press(Message::CollapseAll),
                     ]
                     .spacing(10),
-                    content
-                ]
-                .spacing(10)
-                .width(Length::Fill),
-            )
-        } else {
-            container(
-                column![text("Select a file to view its contents").size(20)]
+                )
+                .push(
+                    container(
+                        scrollable(tree_content)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .direction(scrollable::Direction::Both {
+                                vertical: scrollable::Scrollbar::default(),
+                                horizontal: scrollable::Scrollbar::default(),
+                            })
+                            .on_scroll(|viewport| Message::TreeScrolled {
+                                offset: viewport.absolute_offset().y,
+                                height: viewport.bounds().height,
+                            }),
+                    )
                     .width(Length::Fill)
-                    .align_items(Alignment::Center)
-                    .spacing(10),
-            )
-        };
-
-        let content = column![
-            combo_box,
-            vertical_space().height(50),
-            scrollable(selected_file),
-        ]
-        .width(Length::Fill)
-        .align_items(Alignment::Center)
-        .spacing(10);
-
-        container(content)
+                    .height(Length::Fill)
+                    .max_width(TREE_VIEW_MAX_WIDTH),
+                );
+        } else {
+            details = details.push(text("Select a file to view its contents"));
+        }
+        container(row![sidebar, details.width(Length::Fill).height(Length::Fill)].spacing(20))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(20)
@@ -271,114 +441,575 @@ impl DataView {
     }
 }
 
-fn map_values(pair: &ConfigPair) -> DataValue {
-    match pair.value {
-        ConfigValue::Object(ref children) => DataValue {
-            id: Uuid::new_v4().to_string(),
-            identifier: pair.identifier.clone(),
-            sign: pair.sign.clone(),
-            value: "...".to_string(),
-            open: false,
-            children: children.iter().map(map_values).collect(),
-        },
-        _ => DataValue {
-            id: Uuid::new_v4().to_string(),
-            identifier: pair.identifier.clone(),
-            sign: pair.sign.clone(),
-            value: pair.value.to_string(),
-            open: false,
-            children: vec![],
-        },
+fn window_start(offset: f32, _height: f32, row_height: f32, count: usize) -> usize {
+    ((offset.max(0.0) / row_height) as usize)
+        .saturating_sub(ROW_OVERSCAN)
+        .min(count)
+}
+
+fn window_end(offset: f32, height: f32, row_height: f32, count: usize) -> usize {
+    (((offset.max(0.0) + height.max(row_height)) / row_height).ceil() as usize)
+        .saturating_add(ROW_OVERSCAN)
+        .min(count)
+}
+
+#[derive(Debug, Default)]
+struct TreeRowCache {
+    rows: Vec<TreeRowIndex>,
+    content_width: f32,
+}
+
+#[derive(Debug, Clone)]
+struct TreeRowIndex {
+    parent: Option<usize>,
+    child_index: usize,
+    depth: usize,
+    expandable: bool,
+    open: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TreeRow {
+    id: String,
+    depth: usize,
+    label: String,
+    expandable: bool,
+    open: bool,
+}
+
+struct TreeRows {
+    rows: Vec<TreeRow>,
+    start: usize,
+    end: usize,
+    total: usize,
+    content_width: f32,
+}
+
+fn visible_tree_rows(
+    entries: &[ConfigEntry],
+    cache: &TreeRowCache,
+    offset: f32,
+    height: f32,
+) -> TreeRows {
+    let start = window_start(offset, height, TREE_ROW_HEIGHT, cache.rows.len());
+    let end = window_end(offset, height, TREE_ROW_HEIGHT, cache.rows.len());
+    TreeRows {
+        rows: (start..end)
+            .map(|index| tree_row(entries, cache, index))
+            .collect(),
+        start,
+        end,
+        total: cache.rows.len(),
+        content_width: cache.content_width,
     }
 }
 
-async fn parse(path: PathBuf) -> Arc<HashMap<String, Vec<ConfigPair>>> {
-    let data = parse_game(&path);
-    Arc::new(data)
+fn tree_row(entries: &[ConfigEntry], cache: &TreeRowCache, index: usize) -> TreeRow {
+    let mut path = Vec::new();
+    let mut current = Some(index);
+    while let Some(row_index) = current {
+        let row = &cache.rows[row_index];
+        path.push(row.child_index);
+        current = row.parent;
+    }
+    path.reverse();
+
+    let row_index = &cache.rows[index];
+    let mut identifier = String::new();
+    let mut sign = String::new();
+    let mut value = match &entries[path[0]] {
+        ConfigEntry::Pair(pair) => {
+            identifier.clone_from(&pair.identifier);
+            sign.clone_from(&pair.sign);
+            &pair.value
+        }
+        ConfigEntry::Value(value) => value,
+    };
+
+    for &child_index in &path[1..] {
+        match value {
+            ConfigValue::Object(children) | ConfigValue::Template(_, children) => {
+                match &children[child_index] {
+                    ConfigEntry::Pair(pair) => {
+                        identifier.clone_from(&pair.identifier);
+                        sign.clone_from(&pair.sign);
+                        value = &pair.value;
+                    }
+                    ConfigEntry::Value(child) => {
+                        identifier.clear();
+                        sign.clear();
+                        value = child;
+                    }
+                }
+            }
+            ConfigValue::Array(children) | ConfigValue::Named(_, children) => {
+                identifier = format!("[{child_index}]");
+                sign.clear();
+                value = &children[child_index];
+            }
+            _ => unreachable!("tree row path must point to a child collection"),
+        }
+    }
+
+    let display = match value {
+        ConfigValue::Object(_) | ConfigValue::Array(_) => "{ ... }".to_string(),
+        ConfigValue::Template(name, _) => format!("[[{name}] ... ]"),
+        ConfigValue::Empty => String::new(),
+        ConfigValue::Named(name, _) => format!("{name} {{ ... }}"),
+        _ => value.to_string(),
+    };
+    let label = if identifier.is_empty() {
+        display
+    } else if matches!(value, ConfigValue::Empty) {
+        format!("{identifier} {sign}")
+    } else if sign.is_empty() {
+        format!("{identifier} {display}")
+    } else {
+        format!("{identifier} {sign} {display}")
+    };
+    TreeRow {
+        id: path
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join("/"),
+        depth: row_index.depth,
+        label,
+        expandable: row_index.expandable,
+        open: row_index.open,
+    }
+}
+
+fn flatten_tree_rows(
+    entries: &[ConfigEntry],
+    expand_all: bool,
+    expanded: &HashSet<String>,
+    collapsed: &HashSet<String>,
+) -> TreeRowCache {
+    struct Collector<'a> {
+        expand_all: bool,
+        expanded: &'a HashSet<String>,
+        collapsed: &'a HashSet<String>,
+        content_width: f32,
+        rows: Vec<TreeRowIndex>,
+    }
+
+    impl Collector<'_> {
+        fn visit(
+            &mut self,
+            path: &mut Vec<usize>,
+            parent: Option<usize>,
+            child_index: usize,
+            identifier: &str,
+            sign: &str,
+            value: &ConfigValue,
+        ) {
+            path.push(child_index);
+            let depth = path.len() - 1;
+            let id = path
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join("/");
+            let children = match value {
+                ConfigValue::Object(entries) | ConfigValue::Template(_, entries) => {
+                    !entries.is_empty()
+                }
+                ConfigValue::Array(values) | ConfigValue::Named(_, values) => !values.is_empty(),
+                _ => false,
+            };
+            let display_width = match value {
+                ConfigValue::Object(_) | ConfigValue::Array(_) => 6,
+                ConfigValue::Named(name, _) => name.chars().count() + 7,
+                ConfigValue::Template(name, _) => name.chars().count() + 7,
+                ConfigValue::Empty => 0,
+                ConfigValue::Expression(expression) => expression.chars().count(),
+                ConfigValue::String(value) => {
+                    value.chars().count()
+                        + value.chars().filter(|ch| matches!(ch, '"' | '\\')).count()
+                        + 2
+                }
+                ConfigValue::Number(value) => formatted_char_count(value),
+                ConfigValue::Identifier(value) | ConfigValue::Date(value) => value.chars().count(),
+            };
+            let label_width = identifier.chars().count()
+                + usize::from(!sign.is_empty()) * (sign.chars().count() + 2)
+                + 1
+                + display_width;
+            self.content_width = self
+                .content_width
+                .max(depth as f32 * 25.0 + 30.0 + label_width as f32 * TREE_CHARACTER_WIDTH);
+            let open = self.expand_all && !self.collapsed.contains(&id)
+                || !self.expand_all && self.expanded.contains(&id);
+            let row_index = self.rows.len();
+            self.rows.push(TreeRowIndex {
+                parent,
+                child_index,
+                depth,
+                expandable: children,
+                open,
+            });
+            if !open || !children {
+                path.pop();
+                return;
+            }
+            match value {
+                ConfigValue::Object(entries) | ConfigValue::Template(_, entries) => {
+                    for (child_index, entry) in entries.iter().enumerate() {
+                        match entry {
+                            crate::parser::ConfigEntry::Pair(pair) => self.visit(
+                                path,
+                                Some(row_index),
+                                child_index,
+                                &pair.identifier,
+                                &pair.sign,
+                                &pair.value,
+                            ),
+                            crate::parser::ConfigEntry::Value(value) => {
+                                self.visit(path, Some(row_index), child_index, "", "", value)
+                            }
+                        }
+                    }
+                }
+                ConfigValue::Array(values) | ConfigValue::Named(_, values) => {
+                    for (child_index, child) in values.iter().enumerate() {
+                        self.visit(
+                            path,
+                            Some(row_index),
+                            child_index,
+                            &format!("[{child_index}]"),
+                            "",
+                            child,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            path.pop();
+        }
+    }
+
+    let mut collector = Collector {
+        expand_all,
+        expanded,
+        collapsed,
+        content_width: 0.0,
+        rows: Vec::new(),
+    };
+    let mut path = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match entry {
+            ConfigEntry::Pair(pair) => collector.visit(
+                &mut path,
+                None,
+                index,
+                &pair.identifier,
+                &pair.sign,
+                &pair.value,
+            ),
+            ConfigEntry::Value(value) => collector.visit(&mut path, None, index, "", "", value),
+        }
+    }
+    TreeRowCache {
+        rows: collector.rows,
+        content_width: collector.content_width.max(1.0),
+    }
+}
+
+fn formatted_char_count(value: &impl std::fmt::Display) -> usize {
+    struct CharCounter(usize);
+
+    impl std::fmt::Write for CharCounter {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 += text.chars().count();
+            Ok(())
+        }
+    }
+
+    let mut counter = CharCounter(0);
+    let _ = std::fmt::write(&mut counter, format_args!("{value}"));
+    counter.0
+}
+
+fn create_tree_row(value: &TreeRow) -> Element<'static, Message> {
+    let mut row = Row::new()
+        .width(Length::Fill)
+        .push(Space::new().width((value.depth as f32) * 25.0));
+    if value.expandable {
+        let action = if value.open {
+            Message::Collapse(value.id.clone())
+        } else {
+            Message::Expand(value.id.clone())
+        };
+        row = row.push(
+            button(if value.open { "-" } else { "+" })
+                .width(20)
+                .height(TREE_ROW_HEIGHT as u32)
+                .on_press(action),
+        );
+    } else {
+        row = row.push(Space::new().width(20));
+    }
+    row.push(Space::new().width(10))
+        .push(text(value.label.clone()).wrapping(iced::widget::text::Wrapping::None))
+        .height(TREE_ROW_HEIGHT)
+        .into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::Instant;
+    use tempfile::tempdir;
 
-    #[test]
-    fn test_map_values_simple_number_and_string() {
-        let pair_num = ConfigPair {
-            identifier: "num".to_string(),
-            sign: "=".to_string(),
-            value: ConfigValue::Number(1.0),
-        };
-
-        let dv = map_values(&pair_num);
-        assert_eq!(dv.identifier, "num");
-        assert_eq!(dv.sign, "=");
-        assert_eq!(dv.value, "1");
-        assert!(dv.children.is_empty());
-
-        let pair_str = ConfigPair {
-            identifier: "s".to_string(),
-            sign: "=".to_string(),
-            value: ConfigValue::String("hello".to_string()),
-        };
-
-        let dv2 = map_values(&pair_str);
-        assert_eq!(dv2.identifier, "s");
-        assert_eq!(dv2.value, "\"hello\"");
+    fn rows_for(
+        entries: &[ConfigEntry],
+        expand_all: bool,
+        expanded: &HashSet<String>,
+        collapsed: &HashSet<String>,
+        offset: f32,
+        height: f32,
+    ) -> TreeRows {
+        let cache = flatten_tree_rows(entries, expand_all, expanded, collapsed);
+        visible_tree_rows(entries, &cache, offset, height)
     }
 
     #[test]
-    fn test_map_values_object_nesting() {
-        let child = ConfigPair {
-            identifier: "child".to_string(),
-            sign: "=".to_string(),
-            value: ConfigValue::String("v".to_string()),
-        };
-
-        let parent = ConfigPair {
-            identifier: "parent".to_string(),
-            sign: "=".to_string(),
-            value: ConfigValue::Object(vec![child.clone()]),
-        };
-
-        let dv = map_values(&parent);
-        assert_eq!(dv.identifier, "parent");
-        assert_eq!(dv.value, "...");
-        assert_eq!(dv.children.len(), 1);
-        assert_eq!(dv.children[0].identifier, "child");
-        assert_eq!(dv.children[0].value, "\"v\"");
+    fn preserves_duplicate_order_and_expands_nested_values() {
+        let pairs = crate::parser::parse_config_entries(
+            "z = 1 a = { 2 { child = yes } } z = rgb { 1 2 3 }",
+        )
+        .unwrap();
+        let rows = rows_for(&pairs, true, &HashSet::new(), &HashSet::new(), 0.0, 1000.0);
+        assert_eq!(rows.total, 9);
+        assert_eq!(
+            rows.rows
+                .iter()
+                .take(3)
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["z = 1", "a = { ... }", "[0] 2"]
+        );
+        assert!(rows.rows.iter().any(|row| row.label == "z = rgb { ... }"));
+        assert!(rows.rows.iter().any(|row| row.label == "[2] 3"));
     }
 
     #[test]
-    fn test_dataview_selected_groups() {
-        let mut view = DataView {
-            is_loading: false,
-            data: HashMap::new(),
-            current_open_file: HashMap::new(),
-            files: combo_box::State::new(vec![]),
-            selected_file: None,
-        };
+    fn filters_relative_paths_case_insensitively() {
+        let mut cache = FileSearchCache::default();
+        cache.set_files(
+            ["common/Alpha.txt", "events/alpha.txt"]
+                .map(str::to_owned)
+                .into_iter(),
+        );
+        assert_eq!(cache.matches.len(), 2);
+        cache.set_query("events/".into());
+        assert_eq!(cache.matches, ["events/alpha.txt"]);
+        let normalized = cache.normalized_paths[0].0.clone();
+        cache.set_query("ALPHA".into());
+        assert_eq!(cache.matches.len(), 2);
+        assert_eq!(cache.normalized_paths[0].0, normalized);
+        cache.set_query("missing".into());
+        assert!(cache.matches.is_empty());
+        cache.set_files(["other/file.txt".to_owned()].into_iter());
+        assert!(cache.matches.is_empty());
+    }
 
-        let pair1 = ConfigPair {
-            identifier: "grp".to_string(),
-            sign: "=".to_string(),
-            value: ConfigValue::Number(2.0),
-        };
+    #[test]
+    fn selecting_file_preserves_source_order_and_duplicates() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.data.insert(
+            "events/a.txt".into(),
+            crate::parser::parse_config_entries("z = 1 a = 2 z = 3").unwrap(),
+        );
+        let _ = view.update(Message::FilterChanged("EVENTS".into()));
+        let _ = view.update(Message::Selected("events/a.txt".into()));
+        assert_eq!(view.selected_file.as_deref(), Some("events/a.txt"));
+        assert_eq!(
+            rows_for(
+                &view.data["events/a.txt"],
+                false,
+                &view.expanded,
+                &view.collapsed,
+                0.0,
+                1000.0,
+            )
+            .rows
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>(),
+            ["z = 1", "a = 2", "z = 3"]
+        );
+    }
 
-        // two entries with same identifier should group under the same key
-        let entries = vec![pair1.clone(), pair1.clone()];
-        let mut map = HashMap::new();
-        map.insert("file1".to_string(), entries);
+    #[test]
+    fn caches_flattened_rows_until_expansion_changes() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        view.data.insert(
+            "sample.txt".into(),
+            crate::parser::parse_config_entries("outer = { child = yes }").unwrap(),
+        );
+        let _ = view.update(Message::Selected("sample.txt".into()));
 
-        let arc = Arc::new(map);
-        // simulate Loaded
-        let _ = view.update(Message::Loaded(arc.clone()));
-        assert!(!view.is_loading);
-        assert!(view.data.contains_key("file1"));
+        assert!(view.tree_rows.borrow().is_none());
+        let _ = view.view();
+        assert_eq!(view.tree_rows_cache().rows.len(), 1);
+        assert!(view.tree_rows.borrow().is_some());
 
-        // select file1
-        let _ = view.update(Message::Selected("file1".to_string()));
-        assert_eq!(view.selected_file.as_ref().map(String::as_str), Some("file1"));
-        assert!(view.current_open_file.contains_key("grp"));
-        assert_eq!(view.current_open_file.get("grp").unwrap().len(), 2);
+        let _ = view.update(Message::TreeScrolled {
+            offset: TREE_ROW_HEIGHT,
+            height: 100.0,
+        });
+        let _ = view.view();
+        assert!(view.tree_rows.borrow().is_some());
+
+        let _ = view.update(Message::Expand("0".into()));
+        assert!(view.tree_rows.borrow().is_none());
+        let _ = view.view();
+        assert_eq!(view.tree_rows_cache().rows.len(), 2);
+    }
+
+    #[test]
+    fn virtual_windows_cover_top_middle_bottom_and_resize() {
+        let count = 10_000;
+        assert_eq!(window_start(0.0, 280.0, TREE_ROW_HEIGHT, count), 0);
+        assert_eq!(window_end(0.0, 280.0, TREE_ROW_HEIGHT, count), 13);
+        assert_eq!(window_start(1400.0, 280.0, TREE_ROW_HEIGHT, count), 47);
+        assert_eq!(window_end(1400.0, 280.0, TREE_ROW_HEIGHT, count), 63);
+        assert_eq!(
+            window_start(1_000_000.0, 280.0, TREE_ROW_HEIGHT, count),
+            count
+        );
+        assert_eq!(
+            window_end(1_000_000.0, 280.0, TREE_ROW_HEIGHT, count),
+            count
+        );
+        assert_eq!(window_end(0.0, 560.0, TREE_ROW_HEIGHT, count), 23);
+    }
+
+    #[test]
+    fn tree_materializes_only_the_viewport_window() {
+        let input = (0..1000)
+            .map(|index| format!("key{index} = yes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pairs = crate::parser::parse_config_entries(&input).unwrap();
+        let rows = rows_for(
+            &pairs,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+            10_000.0,
+            280.0,
+        );
+        assert_eq!(rows.total, 1000);
+        assert!(rows.rows.len() < 20);
+        assert_eq!(
+            rows.start,
+            window_start(10_000.0, 280.0, TREE_ROW_HEIGHT, 1000)
+        );
+    }
+
+    #[test]
+    fn tree_content_width_stays_stable_across_virtual_windows() {
+        let mut lines = (0..20)
+            .map(|index| format!("key{index} = yes"))
+            .collect::<Vec<_>>();
+        lines.push(format!("long = \"{}\"", "x".repeat(160)));
+        let pairs = crate::parser::parse_config_entries(&lines.join("\n")).unwrap();
+
+        let top = rows_for(&pairs, false, &HashSet::new(), &HashSet::new(), 0.0, 100.0);
+        let bottom = rows_for(
+            &pairs,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+            500.0,
+            100.0,
+        );
+
+        assert!(top.content_width > TREE_VIEW_MAX_WIDTH);
+        assert_eq!(top.content_width, bottom.content_width);
+        assert!(!top.rows.iter().any(|row| row.label.starts_with("long")));
+    }
+
+    #[test]
+    fn displays_top_level_values_without_keys() {
+        let entries = crate::parser::parse_config_entries("first_token second_token").unwrap();
+        let rows = rows_for(
+            &entries,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+            0.0,
+            100.0,
+        );
+        assert_eq!(
+            rows.rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["first_token", "second_token"]
+        );
+    }
+
+    #[test]
+    fn displays_and_expands_template_blocks() {
+        let entries =
+            crate::parser::parse_config_entries("conditional = [[!FLAG] active = yes ]").unwrap();
+        let rows = rows_for(&entries, true, &HashSet::new(), &HashSet::new(), 0.0, 100.0);
+        assert_eq!(rows.rows[0].label, "conditional = [[!FLAG] ... ]");
+        assert_eq!(rows.rows[1].label, "active = yes");
+    }
+
+    #[test]
+    fn worker_delivers_results_and_errors() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("good.txt"), "a = yes").unwrap();
+        fs::write(dir.path().join("bad.txt"), r#"a = "bad\q""#).unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while view.job.is_some() && Instant::now() < deadline {
+            let _ = view.update(Message::PollLoad);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(view.job.is_none(), "worker did not finish");
+        assert!(view.data.contains_key("good.txt"));
+        assert_eq!(view.errors.len(), 1);
+        assert!(view.load_error.is_none());
+    }
+
+    #[test]
+    fn cancelling_discards_active_job() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let cancelled = Arc::clone(&view.job.as_ref().unwrap().cancelled);
+        let _ = view.update(Message::CancelLoad);
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(view.job.is_none());
+        assert!(view.cancelled);
+    }
+
+    #[test]
+    fn worker_reports_scan_failure() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().join("missing"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while view.job.is_some() && Instant::now() < deadline {
+            let _ = view.update(Message::PollLoad);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(view.job.is_none(), "worker did not finish");
+        assert!(view
+            .load_error
+            .as_deref()
+            .unwrap()
+            .contains("Could not scan"));
     }
 }

@@ -4,17 +4,22 @@ COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
 
 object = {
     "{" ~ "}"
-  | "{" ~ (pair)+ ~ "}"
+  | "{" ~ scope_entry* ~ "}"
 }
 
-identifier = ${ (!(" " | "\"" | "}" | "{" | "=" | "\n" | "\r" | "\t" | "#") ~ ANY)+ }
+scope_entry = { pair | value }
 
-pair = { (identifier | string) ~ sign ~ value }
+bracket_substitution = { "[" ~ (!"]" ~ ANY)* ~ "]" }
+identifier = ${ (bracket_substitution | (!(" " | "\"" | "}" | "{" | "[" | "]" | "=" | "<" | ">" | "!" | "+" | "\n" | "\r" | "\t" | "#") ~ ANY))+ }
+
+pair = { (identifier | string) ~ sign ~ (value | &("}" | EOI)) }
 sign = { ("<=" | ">=" | "!=" | "=" | "<" | ">" | "+") }
 
-array = { "{" ~ value+ ~ "}" }
-
-value = _{ object | array | string | date | number | named | identifier }
+value = _{ template | expression | object | string | date | number | named | identifier }
+array = { "{" ~ value* ~ "}" }
+template = { "[[" ~ template_name ~ "]" ~ scope_entry* ~ "]" }
+template_name = @{ (!"]" ~ ANY)+ }
+expression = @{ "@" ~ "\\"? ~ "[" ~ (!"]" ~ ANY)* ~ "]" }
 
 string = ${ "\"" ~ inner ~ "\"" }
 inner  = @{ char* }
@@ -23,14 +28,17 @@ char   = @{
   | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
 
-named = { ASCII_ALPHA+ ~ array }
+named = { name ~ array }
+name = @{ ASCII_ALPHA+ }
 
 date = @{
-    ASCII_DIGIT{4} ~ "." ~ ASCII_DIGIT{1, 2} ~ "." ~ ASCII_DIGIT{1, 2} ~ ("." ~ ASCII_DIGIT*)?
+    ASCII_DIGIT{4} ~ "." ~ ASCII_DIGIT{1, 2} ~ "." ~ ASCII_DIGIT{1, 2} ~ ("." ~ ASCII_DIGIT*)? ~ &boundary
 }
 
 number = @{
-    "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT*)? ~ (NEWLINE | " ")
+    ("+" | "-")? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT*)? ~ &boundary
 }
 
+boundary = _{ " " | "\t" | "\r" | "\n" | "}" | "#" | EOI }
 config = _{ SOI ~ (pair)* ~ EOI }
+config_entries = _{ SOI ~ scope_entry* ~ EOI }
