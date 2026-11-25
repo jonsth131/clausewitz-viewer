@@ -6,6 +6,7 @@ build:
 
 release:
     cargo build --release --locked
+    target/release/clausewitz-viewer
 
 run:
     cargo run --locked

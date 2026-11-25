@@ -1,6 +1,7 @@
 mod file;
 mod game;
 mod gui;
+mod hoi4;
 mod logging;
 mod parser;
 

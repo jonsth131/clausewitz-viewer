@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -10,15 +10,62 @@ use std::{
 
 use crate::{
     file::read_file,
+    hoi4::{
+        self,
+        decisions::{self, DecisionFile},
+        events::{self, EventFile},
+        focus::{self, FocusTree},
+        icons::{self, Icons},
+        ideas::{self, IdeaFile},
+    },
     parser::{parse_config_entries, ConfigEntry},
 };
 
 type ParsedFile = Result<Option<Vec<ConfigEntry>>, String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameProfile {
+    HeartsOfIronIv,
+    Stellaris,
+    #[default]
+    Unknown,
+    Ambiguous,
+}
+
+impl GameProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HeartsOfIronIv => "Hearts of Iron IV",
+            Self::Stellaris => "Stellaris",
+            Self::Unknown => "Unknown game",
+            Self::Ambiguous => "Ambiguous game",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedGame {
+    pub profile: GameProfile,
     pub files: BTreeMap<String, Vec<ConfigEntry>>,
+    pub focus_trees: Vec<FocusTree>,
+    pub decision_files: Vec<DecisionFile>,
+    pub event_files: Vec<EventFile>,
+    pub idea_files: Vec<IdeaFile>,
+    pub hoi4_icons: Icons,
     pub errors: Vec<String>,
+}
+
+fn detect_game(root: &Path) -> GameProfile {
+    let has_directories =
+        |paths: &[&str]| paths.iter().all(|relative| root.join(relative).is_dir());
+    let focus_game = has_directories(&["common/national_focus", "common/units/names_divisions"]);
+    let space_game = has_directories(&["common/ship_sizes", "common/species_classes"]);
+    match (focus_game, space_game) {
+        (true, false) => GameProfile::HeartsOfIronIv,
+        (false, true) => GameProfile::Stellaris,
+        (true, true) => GameProfile::Ambiguous,
+        (false, false) => GameProfile::Unknown,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +89,8 @@ pub fn parse_game(
     if cancelled.load(Ordering::Relaxed) {
         return Ok(None);
     }
+    let profile = detect_game(path);
+    log::debug!("Detected profile: {}", profile.label());
     log::debug!("Found {} .txt files in {}", files.len(), path.display());
     let total = files.len();
     progress(LoadProgress::Parsing {
@@ -71,6 +120,70 @@ pub fn parse_game(
             }
         }
     }
+    let mut focus_trees = if profile == GameProfile::HeartsOfIronIv {
+        focus::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    let mut decision_files = if profile == GameProfile::HeartsOfIronIv {
+        decisions::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    let mut event_files = if profile == GameProfile::HeartsOfIronIv {
+        events::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    let mut idea_files = if profile == GameProfile::HeartsOfIronIv {
+        ideas::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    for message in hoi4::localize(
+        &mut focus_trees,
+        &mut decision_files,
+        &mut event_files,
+        &mut idea_files,
+        path,
+        cancelled,
+    ) {
+        log::warn!("{message}");
+        errors.push(message);
+    }
+    let mut wanted: HashMap<String, u32> = focus_trees
+        .iter()
+        .flat_map(|tree| &tree.focuses)
+        .filter_map(|focus| focus.icon.clone())
+        .chain(
+            decision_files
+                .iter()
+                .flat_map(|file| &file.decisions)
+                .filter_map(|decision| decision.icon.clone()),
+        )
+        .chain(
+            idea_files
+                .iter()
+                .flat_map(|file| &file.ideas)
+                .filter_map(|idea| idea.picture.clone()),
+        )
+        .map(|name| (name, icons::ICON_SIZE))
+        .collect();
+    for picture in event_files
+        .iter()
+        .flat_map(|file| &file.events)
+        .filter_map(|event| event.picture.as_ref())
+    {
+        wanted.insert(picture.clone(), icons::EVENT_PICTURE_SIZE);
+    }
+    let (hoi4_icons, icon_errors) = icons::load(path, wanted, cancelled);
+    for message in icon_errors {
+        log::warn!("{message}");
+        errors.push(message);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     log::info!(
         "Loaded {} non-empty files from {}; {} file errors",
         parsed_files.len(),
@@ -78,7 +191,13 @@ pub fn parse_game(
         errors.len()
     );
     Ok(Some(ParsedGame {
+        profile,
         files: parsed_files,
+        focus_trees,
+        decision_files,
+        event_files,
+        idea_files,
+        hoi4_icons,
         errors,
     }))
 }
@@ -225,6 +344,284 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn detects_complete_distinct_signatures_and_rejects_ambiguous_folders() {
+        let dir = tempdir().unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::Unknown);
+
+        fs::create_dir_all(dir.path().join("common/national_focus")).unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::Unknown);
+        fs::create_dir_all(dir.path().join("common/units/names_divisions")).unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::HeartsOfIronIv);
+
+        fs::create_dir_all(dir.path().join("common/ship_sizes")).unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::HeartsOfIronIv);
+        fs::create_dir_all(dir.path().join("common/species_classes")).unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::Ambiguous);
+
+        let parsed = parse_game(dir.path(), &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.profile, GameProfile::Ambiguous);
+    }
+
+    #[test]
+    fn detects_second_signature_without_using_folder_name() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("common/ship_sizes")).unwrap();
+        fs::create_dir_all(dir.path().join("common/species_classes")).unwrap();
+        fs::write(dir.path().join("sample.txt"), "key = yes").unwrap();
+
+        let parsed = parse_game(dir.path(), &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.profile, GameProfile::Stellaris);
+        assert!(parsed.files.contains_key("sample.txt"));
+    }
+
+    #[test]
+    fn ignores_files_that_only_have_marker_directory_names() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("common/units")).unwrap();
+        fs::write(dir.path().join("common/national_focus"), "").unwrap();
+        fs::create_dir_all(dir.path().join("common/units/names_divisions")).unwrap();
+        assert_eq!(detect_game(dir.path()), GameProfile::Unknown);
+    }
+
+    #[test]
+    fn loads_focus_trees_with_localized_names() {
+        let dir = tempdir().unwrap();
+        let focus_dir = dir.path().join("common/national_focus");
+        fs::create_dir_all(&focus_dir).unwrap();
+        fs::create_dir_all(dir.path().join("common/units/names_divisions")).unwrap();
+        let localization = dir.path().join("localisation/english");
+        fs::create_dir_all(&localization).unwrap();
+        fs::write(
+            focus_dir.join("sample.txt"),
+            "focus_tree = { id = first focus = { id = alpha } }",
+        )
+        .unwrap();
+        fs::write(
+            localization.join("sample.yml"),
+            "l_english:\n alpha:0 \"First\"\n",
+        )
+        .unwrap();
+        let parsed = parse_game(dir.path(), &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.focus_trees.len(), 1);
+        assert_eq!(parsed.focus_trees[0].focuses[0].name, "First");
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn loads_focus_icons_and_retains_focuses_with_missing_assets() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(root.join("common/national_focus/sample.txt"),
+            "focus_tree = { focus = { id = a icon = GFX_a x = 0 y = 0 } focus = { id = b icon = GFX_missing } }").unwrap();
+        fs::write(
+            root.join("localisation/english/sample.yml"),
+            "l_english:\n a:0 \"First\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("interface/sample.gfx"),
+            r#"spriteType = { name = GFX_a texturefile = "gfx/a.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/a.png"))
+            .unwrap();
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.focus_trees[0].focuses.len(), 2);
+        assert_eq!(parsed.focus_trees[0].focuses[0].name, "First");
+        assert_eq!(parsed.hoi4_icons["GFX_a"].pixels, [1, 2, 3, 255]);
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_missing")));
+    }
+
+    #[test]
+    fn loads_event_localization_picture_and_nested_options() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "events",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(root.join("events/sample.txt"), r#"
+            country_event = {
+                id = demo.1 title = demo.title desc = { text = demo.desc trigger = { active = yes } }
+                picture = GFX_demo
+                option = { name = demo.choice trigger = { allowed = yes } country_event = { id = demo.2 } }
+            }
+            news_event = { id = demo.2 title = absent picture = GFX_missing }
+        "#).unwrap();
+        fs::write(root.join("localisation/english/sample.yml"),
+            "l_english:\n demo.title:0 \"Title\"\n demo.desc:0 \"Description\"\n demo.choice:0 \"Choice\"\n").unwrap();
+        fs::write(
+            root.join("interface/sample.gfx"),
+            r#"spriteType = { name = GFX_demo texturefile = "gfx/demo.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(400, 200, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/demo.png"))
+            .unwrap();
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.event_files.len(), 1);
+        assert_eq!(parsed.event_files[0].events.len(), 2);
+        let first = &parsed.event_files[0].events[0];
+        assert_eq!(first.titles[0].text, "Title");
+        assert_eq!(first.descriptions[0].text, "Description");
+        assert!(first.descriptions[0]
+            .condition
+            .as_ref()
+            .unwrap()
+            .contains("active"));
+        assert_eq!(first.options[0].names[0].text, "Choice");
+        assert_eq!(
+            (
+                parsed.hoi4_icons["GFX_demo"].width,
+                parsed.hoi4_icons["GFX_demo"].height
+            ),
+            (320, 160)
+        );
+        assert_eq!(parsed.event_files[0].events[1].titles[0].text, "absent");
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_missing")));
+    }
+
+    #[test]
+    fn loads_ideas_with_localization_and_pictures() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "common/ideas",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(
+            root.join("common/ideas/sample.txt"),
+            "ideas = { country = { alpha = { picture = example modifier = { value = 2 } } } advisor = { beta = { picture = GFX_missing } } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("localisation/english/sample.yml"),
+            "l_english:\n alpha:0 \"First\"\n alpha_desc:0 \"Details\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("interface/sample.gfx"),
+            r#"spriteType = { name = GFX_idea_example texturefile = "gfx/a.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/a.png"))
+            .unwrap();
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        let ideas = &parsed.idea_files[0].ideas;
+        assert_eq!(ideas.len(), 2);
+        assert_eq!(ideas[0].name, "First");
+        assert_eq!(ideas[0].description.as_deref(), Some("Details"));
+        assert!(ideas[0].script[1].to_string().contains("value = 2"));
+        assert_eq!(parsed.hoi4_icons["GFX_idea_example"].pixels, [1, 2, 3, 255]);
+        assert_eq!(ideas[1].name, "beta");
+        assert!(ideas[1].description.is_none());
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_missing")));
+    }
+
+    #[test]
+    fn loads_decisions_localization_and_icons_with_fallbacks() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "common/decisions/categories",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+
+        fs::write(
+            root.join("common/decisions/sample.txt"),
+            "group = { alpha = { icon = test cost = 5 } beta = { icon = missing } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("common/decisions/categories/meta.txt"),
+            "group = { visible = { enabled = yes } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("localisation/english/sample.yml"),
+            "l_english:\n alpha:0 \"First\"\n alpha_desc:0 \"Details\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("interface/sample.gfx"),
+            r#"spriteType = { name = GFX_decision_test texturefile = "gfx/a.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/a.png"))
+            .unwrap();
+
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.decision_files.len(), 1);
+        let decisions = &parsed.decision_files[0].decisions;
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].name, "First");
+        assert!(decisions[0].tooltip.contains("Details"));
+        assert!(decisions[0].tooltip.contains("cost = 5"));
+        assert_eq!(
+            parsed.hoi4_icons["GFX_decision_test"].pixels,
+            [1, 2, 3, 255]
+        );
+        assert_eq!(decisions[1].name, "beta");
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_decision_missing")));
+    }
 
     #[test]
     fn parse_game_keeps_files_with_matching_stems() {

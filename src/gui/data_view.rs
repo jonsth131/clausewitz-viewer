@@ -12,7 +12,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Subscription, Task};
 
-use crate::game::{parse_game, LoadProgress, ParsedGame};
+use super::hoi4;
+use crate::game::{parse_game, GameProfile, LoadProgress, ParsedGame};
 use crate::parser::{ConfigEntry, ConfigValue};
 
 const FILE_ROW_HEIGHT: f32 = 30.0;
@@ -33,6 +34,25 @@ pub enum Message {
     ExpandAll,
     FilesScrolled { offset: f32, height: f32 },
     TreeScrolled { offset: f32, height: f32 },
+    ShowFiles,
+    ShowFocuses,
+    ShowDecisions,
+    ShowEvents,
+    ShowIdeas,
+    HoI4(hoi4::Message),
+    HoI4Decisions(hoi4::decisions::Message),
+    HoI4Events(hoi4::events::Message),
+    HoI4Ideas(hoi4::ideas::Message),
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Browser {
+    #[default]
+    Files,
+    Focuses,
+    Decisions,
+    Events,
+    Ideas,
 }
 
 #[derive(Debug)]
@@ -89,7 +109,13 @@ pub struct DataView {
     job: Option<LoadJob>,
     progress: LoadProgress,
     cancelled: bool,
+    profile: GameProfile,
     data: BTreeMap<String, Vec<ConfigEntry>>,
+    browser: Browser,
+    hoi4: hoi4::FocusBrowser,
+    hoi4_decisions: hoi4::decisions::DecisionBrowser,
+    hoi4_events: hoi4::events::EventBrowser,
+    hoi4_ideas: hoi4::ideas::IdeaBrowser,
     errors: Vec<String>,
     load_error: Option<String>,
     expanded: HashSet<String>,
@@ -145,7 +171,13 @@ impl DataView {
             job: None,
             progress: LoadProgress::Discovering { files: 0 },
             cancelled: false,
+            profile: GameProfile::Unknown,
             data: BTreeMap::new(),
+            browser: Browser::Files,
+            hoi4: hoi4::FocusBrowser::default(),
+            hoi4_decisions: hoi4::decisions::DecisionBrowser::default(),
+            hoi4_events: hoi4::events::EventBrowser::default(),
+            hoi4_ideas: hoi4::ideas::IdeaBrowser::default(),
             errors: Vec::new(),
             load_error: None,
             expanded: HashSet::new(),
@@ -190,7 +222,23 @@ impl DataView {
                         self.job = None;
                         match result {
                             Ok(Some(data)) => {
+                                self.profile = data.profile;
                                 self.data = data.files;
+                                self.hoi4 =
+                                    hoi4::FocusBrowser::new(data.focus_trees, data.hoi4_icons);
+                                self.hoi4_decisions = hoi4::decisions::DecisionBrowser::new(
+                                    data.decision_files,
+                                    self.hoi4.icon_handles().clone(),
+                                );
+                                self.hoi4_events = hoi4::events::EventBrowser::new(
+                                    data.event_files,
+                                    self.hoi4.icon_handles().clone(),
+                                );
+                                self.hoi4_ideas = hoi4::ideas::IdeaBrowser::new(
+                                    data.idea_files,
+                                    self.hoi4.icon_handles().clone(),
+                                );
+                                self.browser = Browser::Files;
                                 self.errors = data.errors;
                                 self.invalidate_tree_rows();
                                 self.search.set_files(self.data.keys().cloned());
@@ -258,6 +306,31 @@ impl DataView {
             Message::TreeScrolled { offset, height } => {
                 self.tree_viewport = Viewport { offset, height };
             }
+            Message::ShowFiles => self.browser = Browser::Files,
+            Message::ShowFocuses => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Focuses;
+                }
+            }
+            Message::ShowDecisions => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Decisions;
+                }
+            }
+            Message::ShowEvents => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Events;
+                }
+            }
+            Message::ShowIdeas => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Ideas;
+                }
+            }
+            Message::HoI4(message) => self.hoi4.update(message),
+            Message::HoI4Decisions(message) => self.hoi4_decisions.update(message),
+            Message::HoI4Events(message) => self.hoi4_events.update(message),
+            Message::HoI4Ideas(message) => self.hoi4_ideas.update(message),
         }
         Task::none()
     }
@@ -314,6 +387,34 @@ impl DataView {
             return container(text(message)).padding(20).into();
         }
 
+        if self.profile == GameProfile::HeartsOfIronIv {
+            let content = match self.browser {
+                Browser::Files => self.files_view(),
+                Browser::Focuses => self.hoi4.view().map(Message::HoI4),
+                Browser::Decisions => self.hoi4_decisions.view().map(Message::HoI4Decisions),
+                Browser::Events => self.hoi4_events.view().map(Message::HoI4Events),
+                Browser::Ideas => self.hoi4_ideas.view().map(Message::HoI4Ideas),
+            };
+            return column![
+                row![
+                    button("Files").on_press(Message::ShowFiles),
+                    button("National Focus").on_press(Message::ShowFocuses),
+                    button("Decisions").on_press(Message::ShowDecisions),
+                    button("Events").on_press(Message::ShowEvents),
+                    button("Ideas").on_press(Message::ShowIdeas),
+                ]
+                .spacing(10)
+                .padding([0, 20]),
+                content
+            ]
+            .height(Length::Fill)
+            .into();
+        }
+
+        self.files_view()
+    }
+
+    fn files_view(&self) -> Element<'_, Message> {
         let matches = &self.search.matches;
         let file_start = window_start(
             self.file_viewport.offset,
@@ -355,6 +456,7 @@ impl DataView {
             file_content.into()
         };
         let sidebar = column![
+            text(format!("Game: {}", self.profile.label())),
             text_input("Filter file paths", &self.search.query).on_input(Message::FilterChanged),
             scrollable(file_content)
                 .width(Length::Fill)
@@ -983,6 +1085,152 @@ mod tests {
         assert!(view.data.contains_key("good.txt"));
         assert_eq!(view.errors.len(), 1);
         assert!(view.load_error.is_none());
+    }
+
+    #[test]
+    fn worker_passes_detected_profile_to_view() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("common/national_focus")).unwrap();
+        fs::create_dir_all(dir.path().join("common/units/names_divisions")).unwrap();
+        fs::write(dir.path().join("sample.txt"), "key = yes").unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while view.job.is_some() && Instant::now() < deadline {
+            let _ = view.update(Message::PollLoad);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(view.job.is_none(), "worker did not finish");
+        assert_eq!(view.profile, GameProfile::HeartsOfIronIv);
+        assert!(view.data.contains_key("sample.txt"));
+        let _ = view.view();
+    }
+
+    #[test]
+    fn focus_view_is_profile_gated_and_preserves_file_selection() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        view.data.insert(
+            "sample.txt".into(),
+            crate::parser::parse_config_entries("key = yes").unwrap(),
+        );
+        let _ = view.update(Message::Selected("sample.txt".into()));
+        let _ = view.update(Message::ShowFocuses);
+        assert_eq!(view.browser, Browser::Files);
+        view.profile = GameProfile::HeartsOfIronIv;
+        let _ = view.update(Message::ShowFocuses);
+        assert_eq!(view.browser, Browser::Focuses);
+        let _ = view.view();
+        let _ = view.update(Message::ShowFiles);
+        assert_eq!(view.selected_file.as_deref(), Some("sample.txt"));
+    }
+
+    #[test]
+    fn decisions_view_is_profile_gated() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        let _ = view.update(Message::ShowDecisions);
+        assert_eq!(view.browser, Browser::Files);
+    }
+
+    #[test]
+    fn events_view_is_profile_gated_and_has_no_error_panel() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        let _ = view.update(Message::ShowEvents);
+        assert_eq!(view.browser, Browser::Files);
+        view.profile = GameProfile::HeartsOfIronIv;
+        let _ = view.update(Message::ShowEvents);
+        assert_eq!(view.browser, Browser::Events);
+        let _ = view.view();
+    }
+
+    #[test]
+    fn ideas_view_is_profile_gated() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        let _ = view.update(Message::ShowIdeas);
+        assert_eq!(view.browser, Browser::Files);
+        view.profile = GameProfile::HeartsOfIronIv;
+        let _ = view.update(Message::ShowIdeas);
+        assert_eq!(view.browser, Browser::Ideas);
+        let _ = view.view();
+        let _ = view.update(Message::ShowFiles);
+        assert_eq!(view.browser, Browser::Files);
+    }
+
+    #[test]
+    fn file_errors_are_visible_only_in_the_files_view() {
+        use iced::advanced::graphics::core::renderer::Headless;
+        use iced::advanced::{layout, mouse, renderer, widget::Tree, Layout};
+        use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
+
+        fn render(view: &DataView) -> Vec<u8> {
+            let mut element = view.view();
+            let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+                iced::Font::default(),
+                16.into(),
+                Some("tiny-skia"),
+            ))
+            .expect("software renderer");
+            let mut tree = Tree::new(element.as_widget());
+            let size = Size::new(800.0, 600.0);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &Theme::Dark,
+                &renderer::Style {
+                    text_color: Color::WHITE,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::new(Point::ORIGIN, size),
+            );
+            renderer.screenshot(Size::new(800, 600), 1.0, Color::BLACK)
+        }
+
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        view.profile = GameProfile::HeartsOfIronIv;
+        for browser in [
+            Browser::Focuses,
+            Browser::Decisions,
+            Browser::Events,
+            Browser::Ideas,
+            Browser::Files,
+        ] {
+            view.browser = browser;
+            view.errors.clear();
+            let without_errors = render(&view);
+            view.errors.push("Synthetic file error".into());
+            let with_errors = render(&view);
+            if view.browser == Browser::Files {
+                assert_ne!(without_errors, with_errors);
+            } else {
+                assert_eq!(without_errors, with_errors);
+            }
+        }
+        view.profile = GameProfile::HeartsOfIronIv;
+        let _ = view.update(Message::ShowDecisions);
+        assert_eq!(view.browser, Browser::Decisions);
+        let _ = view.view();
+        let _ = view.update(Message::ShowFiles);
+        assert_eq!(view.browser, Browser::Files);
+        let _ = view.view();
     }
 
     #[test]

@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-iced = { version = "0.14.0", features = ["advanced", "tokio", "debug"] }
+iced = { version = "0.14.0", features = ["advanced", "canvas", "image", "tokio", "debug"] }
+image = { version = "0.25", default-features = false, features = ["png", "tga", "jpeg"] }
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image"] }
 log = "0.4"
 pest = "2.9"
 pest_derive = "2.9"

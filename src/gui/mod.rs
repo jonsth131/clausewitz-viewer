@@ -6,6 +6,7 @@ use std::time::Duration;
 
 mod data_view;
 mod debug_panel;
+mod hoi4;
 
 pub fn run() -> iced::Result {
     application(
