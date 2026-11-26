@@ -3,15 +3,14 @@ use std::path::Path;
 
 use crate::parser::{ConfigEntry, ConfigValue};
 
-use super::concise;
-
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub id: String,
     pub category: String,
     pub name: String,
-    pub tooltip: String,
+    pub description: Option<String>,
     pub icon: Option<String>,
+    pub script: Vec<ConfigEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,8 +43,6 @@ pub fn extract(files: &BTreeMap<String, Vec<ConfigEntry>>) -> Vec<DecisionFile> 
                 let ConfigValue::Object(fields) = &pair.value else {
                     continue;
                 };
-                let mut tooltip =
-                    format!("ID: {}\nCategory: {}", pair.identifier, category.identifier);
                 let mut icon = None;
                 for field in fields {
                     if let ConfigEntry::Pair(field) = field {
@@ -65,19 +62,14 @@ pub fn extract(files: &BTreeMap<String, Vec<ConfigEntry>>) -> Vec<DecisionFile> 
                             });
                         }
                     }
-                    let text = field
-                        .to_string()
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    tooltip.push_str(&format!("\n{}", concise(&text, 400)));
                 }
                 decisions.push(Decision {
                     id: pair.identifier.clone(),
                     category: category.identifier.clone(),
                     name: pair.identifier.clone(),
-                    tooltip: concise(&tooltip, 4000),
+                    description: None,
                     icon,
+                    script: fields.clone(),
                 });
             }
         }
@@ -102,12 +94,10 @@ pub(super) fn apply_localization(files: &mut [DecisionFile], values: &HashMap<St
         if let Some(name) = values.get(&decision.id).filter(|value| !value.is_empty()) {
             decision.name.clone_from(name);
         }
-        if let Some(description) = values
+        decision.description = values
             .get(&format!("{}_desc", decision.id))
             .filter(|value| !value.is_empty())
-        {
-            decision.tooltip = format!("{}\n\n{}", concise(description, 500), decision.tooltip);
-        }
+            .cloned();
     }
 }
 
@@ -154,8 +144,13 @@ mod tests {
         assert_eq!(decisions[0].icon.as_deref(), Some("GFX_decision_sample"));
         assert_eq!(decisions[1].icon.as_deref(), Some("GFX_direct"));
         assert_eq!(decisions[2].icon, None);
-        assert!(decisions[0].tooltip.contains("cost = 25"));
-        assert!(decisions[0].tooltip.contains("available ="));
+        let script: String = decisions[0]
+            .script
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(script.contains("cost = 25"));
+        assert!(script.contains("available ="));
     }
 
     #[test]
@@ -171,8 +166,13 @@ mod tests {
         ]);
         apply_localization(&mut files, &values);
         assert_eq!(files[0].decisions[0].name, "First");
-        assert!(files[0].decisions[0].tooltip.contains("Description"));
-        assert!(files[0].decisions[0].tooltip.contains("cost = 3"));
+        assert_eq!(
+            files[0].decisions[0].description.as_deref(),
+            Some("Description")
+        );
+        assert!(files[0].decisions[0].script[0]
+            .to_string()
+            .contains("cost = 3"));
         assert_eq!(files[0].decisions[1].name, "beta");
     }
 

@@ -267,7 +267,8 @@ pub(super) fn apply_localization(trees: &mut [FocusTree], values: &HashMap<Strin
 
 #[cfg(test)]
 fn localize(trees: &mut [FocusTree], root: &Path, cancelled: &AtomicBool) -> Vec<String> {
-    let (values, errors) = super::localization::read(&localization_keys(trees), root, cancelled);
+    let (values, errors) =
+        crate::common::localization::read(&localization_keys(trees), root, cancelled);
     apply_localization(trees, &values);
     errors
 }

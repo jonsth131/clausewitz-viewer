@@ -13,6 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Subscription, Task};
 
 use super::hoi4;
+use super::stellaris;
 use crate::game::{parse_game, GameProfile, LoadProgress, ParsedGame};
 use crate::parser::{ConfigEntry, ConfigValue};
 
@@ -39,10 +40,16 @@ pub enum Message {
     ShowDecisions,
     ShowEvents,
     ShowIdeas,
+    ShowTechnologies,
+    ShowCharacters,
+    ShowStellaris,
     HoI4(hoi4::Message),
     HoI4Decisions(hoi4::decisions::Message),
     HoI4Events(hoi4::events::Message),
     HoI4Ideas(hoi4::ideas::Message),
+    HoI4Technologies(hoi4::technologies::Message),
+    HoI4Characters(hoi4::characters::Message),
+    Stellaris(stellaris::Message),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -53,6 +60,9 @@ enum Browser {
     Decisions,
     Events,
     Ideas,
+    Technologies,
+    Characters,
+    Stellaris,
 }
 
 #[derive(Debug)]
@@ -116,6 +126,9 @@ pub struct DataView {
     hoi4_decisions: hoi4::decisions::DecisionBrowser,
     hoi4_events: hoi4::events::EventBrowser,
     hoi4_ideas: hoi4::ideas::IdeaBrowser,
+    hoi4_technologies: hoi4::technologies::TechnologyBrowser,
+    hoi4_characters: hoi4::characters::CharacterBrowser,
+    stellaris: stellaris::StellarisBrowser,
     errors: Vec<String>,
     load_error: Option<String>,
     expanded: HashSet<String>,
@@ -178,6 +191,9 @@ impl DataView {
             hoi4_decisions: hoi4::decisions::DecisionBrowser::default(),
             hoi4_events: hoi4::events::EventBrowser::default(),
             hoi4_ideas: hoi4::ideas::IdeaBrowser::default(),
+            hoi4_technologies: hoi4::technologies::TechnologyBrowser::default(),
+            hoi4_characters: hoi4::characters::CharacterBrowser::default(),
+            stellaris: stellaris::StellarisBrowser::default(),
             errors: Vec::new(),
             load_error: None,
             expanded: HashSet::new(),
@@ -227,7 +243,10 @@ impl DataView {
                                 self.hoi4 =
                                     hoi4::FocusBrowser::new(data.focus_trees, data.hoi4_icons);
                                 self.hoi4_decisions = hoi4::decisions::DecisionBrowser::new(
-                                    data.decision_files,
+                                    data.decision_files
+                                        .into_iter()
+                                        .map(|file| (file.path, file.decisions))
+                                        .collect(),
                                     self.hoi4.icon_handles().clone(),
                                 );
                                 self.hoi4_events = hoi4::events::EventBrowser::new(
@@ -237,6 +256,24 @@ impl DataView {
                                 self.hoi4_ideas = hoi4::ideas::IdeaBrowser::new(
                                     data.idea_files,
                                     self.hoi4.icon_handles().clone(),
+                                );
+                                self.hoi4_technologies = hoi4::technologies::TechnologyBrowser::new(
+                                    data.technology_files
+                                        .into_iter()
+                                        .map(|file| (file.path, file.technologies))
+                                        .collect(),
+                                    self.hoi4.icon_handles().clone(),
+                                );
+                                self.hoi4_characters = hoi4::characters::CharacterBrowser::new(
+                                    data.character_files
+                                        .into_iter()
+                                        .map(|file| (file.path, file.characters))
+                                        .collect(),
+                                    self.hoi4.icon_handles().clone(),
+                                );
+                                self.stellaris = stellaris::StellarisBrowser::new(
+                                    data.stellaris_files,
+                                    data.stellaris_icons,
                                 );
                                 self.browser = Browser::Files;
                                 self.errors = data.errors;
@@ -327,10 +364,28 @@ impl DataView {
                     self.browser = Browser::Ideas;
                 }
             }
+            Message::ShowTechnologies => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Technologies;
+                }
+            }
+            Message::ShowCharacters => {
+                if self.profile == GameProfile::HeartsOfIronIv {
+                    self.browser = Browser::Characters;
+                }
+            }
+            Message::ShowStellaris => {
+                if self.profile == GameProfile::Stellaris {
+                    self.browser = Browser::Stellaris;
+                }
+            }
             Message::HoI4(message) => self.hoi4.update(message),
             Message::HoI4Decisions(message) => self.hoi4_decisions.update(message),
             Message::HoI4Events(message) => self.hoi4_events.update(message),
             Message::HoI4Ideas(message) => self.hoi4_ideas.update(message),
+            Message::HoI4Technologies(message) => self.hoi4_technologies.update(message),
+            Message::HoI4Characters(message) => self.hoi4_characters.update(message),
+            Message::Stellaris(message) => self.stellaris.update(message),
         }
         Task::none()
     }
@@ -394,17 +449,54 @@ impl DataView {
                 Browser::Decisions => self.hoi4_decisions.view().map(Message::HoI4Decisions),
                 Browser::Events => self.hoi4_events.view().map(Message::HoI4Events),
                 Browser::Ideas => self.hoi4_ideas.view().map(Message::HoI4Ideas),
+                Browser::Technologies => {
+                    self.hoi4_technologies.view().map(Message::HoI4Technologies)
+                }
+                Browser::Characters => self.hoi4_characters.view().map(Message::HoI4Characters),
+                Browser::Stellaris => self.stellaris.view().map(Message::Stellaris),
             };
             return column![
-                row![
-                    button("Files").on_press(Message::ShowFiles),
-                    button("National Focus").on_press(Message::ShowFocuses),
-                    button("Decisions").on_press(Message::ShowDecisions),
-                    button("Events").on_press(Message::ShowEvents),
-                    button("Ideas").on_press(Message::ShowIdeas),
-                ]
-                .spacing(10)
-                .padding([0, 20]),
+                scrollable(
+                    row![
+                        button("Files").on_press(Message::ShowFiles),
+                        button("National Focus").on_press(Message::ShowFocuses),
+                        button("Decisions").on_press(Message::ShowDecisions),
+                        button("Events").on_press(Message::ShowEvents),
+                        button("Ideas").on_press(Message::ShowIdeas),
+                        button("Technologies").on_press(Message::ShowTechnologies),
+                        button("Characters & Advisors").on_press(Message::ShowCharacters),
+                    ]
+                    .spacing(10)
+                    .padding([0, 20])
+                )
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default()
+                ))
+                .height(50),
+                content
+            ]
+            .height(Length::Fill)
+            .into();
+        }
+
+        if self.profile == GameProfile::Stellaris {
+            let content = match self.browser {
+                Browser::Stellaris => self.stellaris.view().map(Message::Stellaris),
+                _ => self.files_view(),
+            };
+            return column![
+                scrollable(
+                    row![
+                        button("Files").on_press(Message::ShowFiles),
+                        button("Custom Views").on_press(Message::ShowStellaris),
+                    ]
+                    .spacing(10)
+                    .padding([0, 20])
+                )
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default()
+                ))
+                .height(50),
                 content
             ]
             .height(Length::Fill)
@@ -1137,6 +1229,20 @@ mod tests {
     }
 
     #[test]
+    fn stellaris_view_is_profile_gated() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        let _ = view.update(Message::ShowStellaris);
+        assert_eq!(view.browser, Browser::Files);
+        view.profile = GameProfile::Stellaris;
+        let _ = view.update(Message::ShowStellaris);
+        assert_eq!(view.browser, Browser::Stellaris);
+        let _ = view.view();
+    }
+
+    #[test]
     fn events_view_is_profile_gated_and_has_no_error_panel() {
         let dir = tempdir().unwrap();
         let (mut view, _) = DataView::new(dir.path().to_owned());
@@ -1161,6 +1267,26 @@ mod tests {
         view.profile = GameProfile::HeartsOfIronIv;
         let _ = view.update(Message::ShowIdeas);
         assert_eq!(view.browser, Browser::Ideas);
+        let _ = view.view();
+        let _ = view.update(Message::ShowFiles);
+        assert_eq!(view.browser, Browser::Files);
+    }
+
+    #[test]
+    fn new_views_are_profile_gated() {
+        let dir = tempdir().unwrap();
+        let (mut view, _) = DataView::new(dir.path().to_owned());
+        let _ = view.update(Message::CancelLoad);
+        view.cancelled = false;
+        let _ = view.update(Message::ShowTechnologies);
+        let _ = view.update(Message::ShowCharacters);
+        assert_eq!(view.browser, Browser::Files);
+        view.profile = GameProfile::HeartsOfIronIv;
+        let _ = view.update(Message::ShowTechnologies);
+        assert_eq!(view.browser, Browser::Technologies);
+        let _ = view.view();
+        let _ = view.update(Message::ShowCharacters);
+        assert_eq!(view.browser, Browser::Characters);
         let _ = view.view();
         let _ = view.update(Message::ShowFiles);
         assert_eq!(view.browser, Browser::Files);
@@ -1211,6 +1337,8 @@ mod tests {
             Browser::Decisions,
             Browser::Events,
             Browser::Ideas,
+            Browser::Technologies,
+            Browser::Characters,
             Browser::Files,
         ] {
             view.browser = browser;

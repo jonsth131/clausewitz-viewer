@@ -6,14 +6,16 @@ use iced::widget::{
 };
 use iced::{Element, Length};
 
+use crate::common::icons::{IconImage, Icons};
 use crate::hoi4::focus::{Focus, FocusTree, TreeChoice};
-use crate::hoi4::icons::{IconImage, Icons};
 
 mod arrows;
+pub mod characters;
 pub mod decisions;
 pub mod events;
 pub mod ideas;
 mod pan;
+pub mod technologies;
 
 const CELL_WIDTH: f32 = 200.0;
 const COLUMN_GAP: f32 = 20.0;

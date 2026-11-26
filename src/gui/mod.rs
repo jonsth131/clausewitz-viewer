@@ -4,9 +4,11 @@ use iced::{application, keyboard, Alignment, Element, Font, Length, Subscription
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod common;
 mod data_view;
 mod debug_panel;
 mod hoi4;
+mod stellaris;
 
 pub fn run() -> iced::Result {
     application(

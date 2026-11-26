@@ -42,7 +42,7 @@ fn localization_line(line: &str) -> Option<(&str, Result<String, ()>)> {
     Some((key, Err(())))
 }
 
-pub(super) fn read(
+pub fn read(
     keys: &HashSet<String>,
     root: &Path,
     cancelled: &AtomicBool,

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -8,17 +8,21 @@ use std::{
     },
 };
 
+use crate::common::icons::Icons;
 use crate::{
+    common::icons,
     file::read_file,
     hoi4::{
         self,
+        characters::{self, CharacterFile},
         decisions::{self, DecisionFile},
         events::{self, EventFile},
         focus::{self, FocusTree},
-        icons::{self, Icons},
         ideas::{self, IdeaFile},
+        technologies::{self, TechnologyFile},
     },
     parser::{parse_config_entries, ConfigEntry},
+    stellaris::definitions::{self, DefinitionFile},
 };
 
 type ParsedFile = Result<Option<Vec<ConfigEntry>>, String>;
@@ -51,7 +55,11 @@ pub struct ParsedGame {
     pub decision_files: Vec<DecisionFile>,
     pub event_files: Vec<EventFile>,
     pub idea_files: Vec<IdeaFile>,
+    pub technology_files: Vec<TechnologyFile>,
+    pub character_files: Vec<CharacterFile>,
     pub hoi4_icons: Icons,
+    pub stellaris_files: Vec<DefinitionFile>,
+    pub stellaris_icons: Icons,
     pub errors: Vec<String>,
 }
 
@@ -140,16 +148,42 @@ pub fn parse_game(
     } else {
         Vec::new()
     };
+    let mut technology_files = if profile == GameProfile::HeartsOfIronIv {
+        technologies::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    let mut character_files = if profile == GameProfile::HeartsOfIronIv {
+        characters::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
     for message in hoi4::localize(
-        &mut focus_trees,
-        &mut decision_files,
-        &mut event_files,
-        &mut idea_files,
+        hoi4::LocalizationTargets {
+            trees: &mut focus_trees,
+            decisions: &mut decision_files,
+            events: &mut event_files,
+            ideas: &mut idea_files,
+            technologies: &mut technology_files,
+            characters: &mut character_files,
+        },
         path,
         cancelled,
     ) {
         log::warn!("{message}");
         errors.push(message);
+    }
+    let mut stellaris_files = if profile == GameProfile::Stellaris {
+        definitions::extract(&parsed_files)
+    } else {
+        Vec::new()
+    };
+    if profile == GameProfile::Stellaris {
+        let keys = definitions::localization_keys(&stellaris_files);
+        let (values, localization_errors) =
+            crate::common::localization::read(&keys, path, cancelled);
+        definitions::apply_localization(&mut stellaris_files, &values);
+        errors.extend(localization_errors);
     }
     let mut wanted: HashMap<String, u32> = focus_trees
         .iter()
@@ -167,6 +201,19 @@ pub fn parse_game(
                 .flat_map(|file| &file.ideas)
                 .filter_map(|idea| idea.picture.clone()),
         )
+        .chain(
+            technology_files
+                .iter()
+                .flat_map(|file| &file.technologies)
+                .filter(|tech| !tech.implicit_icon)
+                .filter_map(|tech| tech.icon.clone()),
+        )
+        .chain(
+            character_files
+                .iter()
+                .flat_map(|file| &file.characters)
+                .flat_map(|character| character.portraits.iter().cloned()),
+        )
         .map(|name| (name, icons::ICON_SIZE))
         .collect();
     for picture in event_files
@@ -176,8 +223,49 @@ pub fn parse_game(
     {
         wanted.insert(picture.clone(), icons::EVENT_PICTURE_SIZE);
     }
-    let (hoi4_icons, icon_errors) = icons::load(path, wanted, cancelled);
+    let stellaris_wanted: HashMap<String, u32> = stellaris_files
+        .iter()
+        .flat_map(|file| &file.definitions)
+        .filter_map(|definition| definition.icon.clone())
+        .map(|name| (name, icons::ICON_SIZE))
+        .collect();
+    let stellaris_textures: HashMap<String, String> = stellaris_files
+        .iter()
+        .flat_map(|file| &file.definitions)
+        .filter_map(|definition| {
+            definition
+                .texture
+                .as_ref()
+                .map(|texture| (texture.clone(), texture.clone()))
+        })
+        .collect();
+    let mut optional = HashSet::new();
+    for icon in technology_files
+        .iter()
+        .flat_map(|file| &file.technologies)
+        .filter(|tech| tech.implicit_icon)
+        .filter_map(|tech| tech.icon.as_ref())
+    {
+        if !wanted.contains_key(icon) {
+            wanted.insert(icon.clone(), icons::ICON_SIZE);
+            optional.insert(icon.clone());
+        }
+    }
+    let (hoi4_icons, icon_errors) = icons::load(path, wanted, &optional, cancelled);
     for message in icon_errors {
+        log::warn!("{message}");
+        errors.push(message);
+    }
+    let (mut stellaris_icons, stellaris_icon_errors) =
+        icons::load(path, stellaris_wanted, &HashSet::new(), cancelled);
+    for message in stellaris_icon_errors {
+        log::warn!("{message}");
+        errors.push(message);
+    }
+    let (direct_icons, direct_icon_errors) =
+        icons::load_textures(path, stellaris_textures, icons::ICON_SIZE, cancelled);
+    stellaris_icons.extend(direct_icons);
+    for message in direct_icon_errors {
         log::warn!("{message}");
         errors.push(message);
     }
@@ -197,7 +285,11 @@ pub fn parse_game(
         decision_files,
         event_files,
         idea_files,
+        technology_files,
+        character_files,
         hoi4_icons,
+        stellaris_files,
+        stellaris_icons,
         errors,
     }))
 }
@@ -378,6 +470,49 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.profile, GameProfile::Stellaris);
         assert!(parsed.files.contains_key("sample.txt"));
+        assert!(parsed.technology_files.is_empty());
+        assert!(parsed.character_files.is_empty());
+    }
+
+    #[test]
+    fn loads_and_localizes_stellaris_definitions_by_profile() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("common/ship_sizes")).unwrap();
+        fs::create_dir_all(dir.path().join("common/species_classes")).unwrap();
+        fs::create_dir_all(dir.path().join("common/ascension_perks")).unwrap();
+        fs::create_dir_all(dir.path().join("localisation/english")).unwrap();
+        fs::create_dir_all(dir.path().join("interface")).unwrap();
+        fs::create_dir_all(dir.path().join("gfx")).unwrap();
+        fs::write(
+            dir.path().join("common/ascension_perks/sample.txt"),
+            "perk_a = { name = perk_a desc = perk_a_desc icon = \"gfx/direct.png\" }",
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(dir.path().join("gfx/direct.png"))
+            .unwrap();
+        fs::write(
+            dir.path().join("localisation/english/sample.yml"),
+            "l_english:\n perk_a:0 \"First Perk\"\n perk_a_desc:0 \"A synthetic description\"\n",
+        )
+        .unwrap();
+        let parsed = parse_game(dir.path(), &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.profile, GameProfile::Stellaris);
+        assert_eq!(parsed.stellaris_files.len(), 1);
+        assert_eq!(parsed.stellaris_files[0].definitions[0].name, "First Perk");
+        assert_eq!(
+            parsed.stellaris_files[0].definitions[0]
+                .description
+                .as_deref(),
+            Some("A synthetic description")
+        );
+        assert!(parsed.focus_trees.is_empty());
+        assert_eq!(
+            parsed.stellaris_icons["gfx/direct.png"].pixels,
+            [1, 2, 3, 255]
+        );
     }
 
     #[test]
@@ -529,6 +664,7 @@ mod tests {
         ] {
             fs::create_dir_all(root.join(folder)).unwrap();
         }
+
         fs::write(
             root.join("common/ideas/sample.txt"),
             "ideas = { country = { alpha = { picture = example modifier = { value = 2 } } } advisor = { beta = { picture = GFX_missing } } }",
@@ -562,6 +698,119 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("GFX_missing")));
+    }
+
+    #[test]
+    fn loads_technology_and_character_data_localization_and_sprites() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "common/technologies",
+            "common/characters",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+
+        fs::write(
+            root.join("common/technologies/first.txt"),
+            "technologies = { alpha = { path = { leads_to_tech = beta } } missing = { } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("common/technologies/second.txt"),
+            "technologies = { beta = { icon = GFX_direct } gamma = { icon = GFX_absent } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("common/characters/sample.txt"),
+            "characters = { person = { name = person_name portraits = { civilian = { large = GFX_person } } advisor = { traits = { skilled } } } }",
+        ).unwrap();
+        fs::write(
+            root.join("localisation/english/sample.yml"),
+            "l_english:\n alpha:0 \"Technology title\"\n alpha_desc:0 \"Technology details\"\n person_name:0 \"Character title\"\n",
+        ).unwrap();
+        fs::write(
+            root.join("interface/sample.gfx"),
+            r#"spriteType = { name = GFX_alpha texturefile = "gfx/a.png" }
+               spriteType = { name = GFX_direct texturefile = "gfx/a.png" }
+               spriteType = { name = GFX_person texturefile = "gfx/a.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/a.png"))
+            .unwrap();
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.technology_files.len(), 2);
+        let alpha = &parsed.technology_files[0].technologies[0];
+        assert_eq!(alpha.name, "Technology title");
+        assert_eq!(alpha.description.as_deref(), Some("Technology details"));
+        assert_eq!(
+            parsed.technology_files[1].technologies[0].linked_from,
+            ["alpha"]
+        );
+        let character = &parsed.character_files[0].characters[0];
+        assert_eq!(character.name, "Character title");
+        assert_eq!(character.roles, ["advisor"]);
+        for sprite in ["GFX_alpha", "GFX_direct", "GFX_person"] {
+            assert_eq!(parsed.hoi4_icons[sprite].pixels, [1, 2, 3, 255]);
+        }
+        assert!(!parsed.hoi4_icons.contains_key("GFX_missing"));
+        assert!(!parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_missing")));
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|error| error.contains("GFX_absent")));
+    }
+
+    #[test]
+    fn loads_large_and_small_character_portraits_in_priority_order() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        for folder in [
+            "common/national_focus",
+            "common/units/names_divisions",
+            "common/characters",
+            "localisation/english",
+            "interface",
+            "gfx",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(
+            root.join("common/characters/sample.txt"),
+            "characters = { person = { portraits = { civilian = { small = GFX_small large = GFX_large } } } }",
+        ).unwrap();
+        fs::write(
+            root.join("interface/portraits.gfx"),
+            r#"spriteType = { name = GFX_small texturefile = "gfx/small.png" }
+               spriteType = { name = GFX_large texturefile = "gfx/large.png" }"#,
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(root.join("gfx/small.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]))
+            .save(root.join("gfx/large.png"))
+            .unwrap();
+        let parsed = parse_game(root, &AtomicBool::new(false), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.character_files[0].characters[0].portraits,
+            ["GFX_large", "GFX_small"]
+        );
+        assert_eq!(parsed.hoi4_icons["GFX_large"].pixels, [4, 5, 6, 255]);
+        assert_eq!(parsed.hoi4_icons["GFX_small"].pixels, [1, 2, 3, 255]);
     }
 
     #[test]
@@ -610,8 +859,11 @@ mod tests {
         let decisions = &parsed.decision_files[0].decisions;
         assert_eq!(decisions.len(), 2);
         assert_eq!(decisions[0].name, "First");
-        assert!(decisions[0].tooltip.contains("Details"));
-        assert!(decisions[0].tooltip.contains("cost = 5"));
+        assert_eq!(decisions[0].description.as_deref(), Some("Details"));
+        assert!(decisions[0]
+            .script
+            .iter()
+            .any(|entry| entry.to_string().contains("cost = 5")));
         assert_eq!(
             parsed.hoi4_icons["GFX_decision_test"].pixels,
             [1, 2, 3, 255]
